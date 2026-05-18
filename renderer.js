@@ -7,10 +7,17 @@ const LABEL_COLORS = ['green','yellow','orange','red','purple','blue','sky','lim
 
 let onRouteToggleCb = null;
 let getRouteOffCb = null;
+let fetchPlacesCb = null;        // (dayDate, body, opts) => Promise<{source, places}>
+const placesCache = new Map();   // dayDate -> {source, places:[{id,q}]}
 
-export function setRouteHandlers({ onToggle, getRouteOff }) {
+export function setRouteHandlers({ onToggle, getRouteOff, fetchPlaces }) {
   onRouteToggleCb = onToggle;
   getRouteOffCb = getRouteOff;
+  fetchPlacesCb = fetchPlaces;
+}
+
+export function resetPlacesCache() {
+  placesCache.clear();
 }
 
 export function renderApp(data) {
@@ -47,56 +54,73 @@ function renderDay(day) {
   }
   body.appendChild(timeline);
 
-  // Map area
+  // Map area (async; loading state handled inside)
   const mapWrap = el('div', 'day-map');
   mapWrap.dataset.dayMap = day.date;
-  renderDayMap(mapWrap, day);
   body.appendChild(mapWrap);
+  renderDayMap(mapWrap, day);
 
   block.appendChild(body);
   return block;
 }
 
-export function renderDayMap(wrap, day) {
+export async function renderDayMap(wrap, day, { refresh = false } = {}) {
   wrap.innerHTML = '';
-  const routeOff = (getRouteOffCb && getRouteOffCb()) || {};
-  const includedItems = day.items.filter(it => !routeOff[it.id]);
-  const waypoints = itemsToWaypoints(includedItems);
+  // Loading state first
+  const loading = el('div', 'day-map-header', '');
+  loading.innerHTML = `<span><strong>🗺️ 路線</strong> · ⏳ 解析地點中…</span>`;
+  wrap.appendChild(loading);
 
+  // Try LLM-cleaned places from backend; fall back to local regex if anything fails.
+  let resolved;
+  try {
+    if (!fetchPlacesCb) throw new Error('fetchPlaces not configured');
+    if (!refresh && placesCache.has(day.date)) {
+      resolved = placesCache.get(day.date);
+    } else {
+      const city = extractCity(day.list_name);
+      resolved = await fetchPlacesCb(day.date, {
+        city,
+        items: day.items.map(it => ({ id: it.id, title: it.title, place: it.place })),
+      }, { refresh });
+      placesCache.set(day.date, resolved);
+    }
+  } catch (e) {
+    console.warn('[map] fetchPlaces failed, using local regex:', e.message);
+    resolved = { source: 'local', places: itemsToWaypoints(day.items, day.list_name) };
+  }
+
+  const routeOff = (getRouteOffCb && getRouteOffCb()) || {};
+  const allWp = resolved.places || [];
+  const waypoints = allWp.filter(w => !routeOff[w.id]);
+
+  wrap.innerHTML = '';
   const header = el('div', 'day-map-header');
+  const sourceLabel = sourceBadge(resolved.source);
+
   if (waypoints.length === 0) {
-    header.innerHTML = `<span><strong>🗺️ 路線</strong> · 沒有可定位的地點</span>`;
+    header.innerHTML = `<span><strong>🗺️ 路線</strong> · 沒有可定位的地點 ${sourceLabel}</span>`;
+    appendRefreshBtn(header, wrap, day);
     wrap.appendChild(header);
     return;
   }
   if (waypoints.length === 1) {
-    header.innerHTML = `<span><strong>🗺️ 路線</strong> · 只有一個地點，無法畫路線</span>`;
+    header.innerHTML = `<span><strong>🗺️ 路線</strong> · 只有一個地點，無法畫路線 ${sourceLabel}</span>`;
     const openUrl = buildOpenUrl(waypoints);
-    if (openUrl) {
-      const a = el('a', 'open-ext', '在 Google Maps 開啟 ↗');
-      a.href = openUrl;
-      a.target = '_blank';
-      a.rel = 'noopener';
-      header.appendChild(a);
-    }
+    if (openUrl) appendOpenLink(header, openUrl);
+    appendRefreshBtn(header, wrap, day);
     wrap.appendChild(header);
     return;
   }
 
-  header.innerHTML = `<span><strong>🗺️ 路線</strong> · 共 ${waypoints.length} 個點（依時間軸順序，可勾選/取消）</span>`;
+  header.innerHTML = `<span><strong>🗺️ 路線</strong> · 共 ${waypoints.length} 個點（依時間軸順序，可勾選/取消） ${sourceLabel}</span>`;
   const openUrl = buildOpenUrl(waypoints);
-  if (openUrl) {
-    const a = el('a', 'open-ext', '在 Google Maps 開啟 ↗');
-    a.href = openUrl;
-    a.target = '_blank';
-    a.rel = 'noopener';
-    header.appendChild(a);
-  }
+  if (openUrl) appendOpenLink(header, openUrl);
+  appendRefreshBtn(header, wrap, day);
   wrap.appendChild(header);
 
   if (!hasMapsKey()) {
-    const note = el('div', 'day-map-empty', '⚠️ 後端未設定 Google Maps API key — 內嵌地圖暫不可用。點上方「在 Google Maps 開啟 ↗」仍可查看路線。');
-    wrap.appendChild(note);
+    wrap.appendChild(el('div', 'day-map-empty', '⚠️ 後端未設定 Google Maps API key — 內嵌地圖暫不可用。點上方「在 Google Maps 開啟 ↗」仍可查看路線。'));
     return;
   }
 
@@ -106,6 +130,39 @@ export function renderDayMap(wrap, day) {
   iframe.allowFullscreen = true;
   iframe.src = buildEmbedUrl(waypoints, 'driving');
   wrap.appendChild(iframe);
+}
+
+function appendOpenLink(header, url) {
+  const a = el('a', 'open-ext', '在 Google Maps 開啟 ↗');
+  a.href = url;
+  a.target = '_blank';
+  a.rel = 'noopener';
+  header.appendChild(a);
+}
+
+function appendRefreshBtn(header, wrap, day) {
+  const btn = el('button', 'map-refresh', '↻ 重新分析');
+  btn.title = '強制請 AI 重新整理這天的地點';
+  btn.addEventListener('click', () => {
+    placesCache.delete(day.date);
+    renderDayMap(wrap, day, { refresh: true });
+  });
+  header.appendChild(btn);
+}
+
+function sourceBadge(source) {
+  if (source === 'llm') return '<small style="color:#9ca3af">· 🤖 AI</small>';
+  if (source === 'cache') return '<small style="color:#9ca3af">· 🤖 AI (cached)</small>';
+  if (source === 'fallback' || source === 'cache_fallback' || source === 'local')
+    return '<small style="color:#9ca3af">· 規則式</small>';
+  return '';
+}
+
+function extractCity(listName) {
+  if (!listName) return '';
+  const s = listName.replace(/^\s*\d+\/\d+\s*/, '').replace(/\([^)]*\)/g, '').trim();
+  const m = s.match(/[一-鿿]{2,}/);
+  return m ? m[0] : '';
 }
 
 function renderTimelineRow(item, day) {

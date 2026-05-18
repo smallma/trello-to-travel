@@ -1,6 +1,6 @@
 // app.js
 import { parseTrello } from './parser.js';
-import { renderApp, renderDayMap, setRouteHandlers } from './renderer.js';
+import { renderApp, renderDayMap, setRouteHandlers, resetPlacesCache } from './renderer.js';
 import { toCopyJson } from './exporter.js';
 import * as store from './store.js';
 import { setMapsKey } from './maps.js';
@@ -20,10 +20,13 @@ setRouteHandlers({
   onToggle: async (itemId, off, day) => {
     if (!activeBoardId) return;
     await store.setRouteOff(activeBoardId, itemId, off);
+    // Re-render the day's map; the renderer's in-memory cache means this won't
+    // re-hit the LLM — it just re-filters the existing places by routeOff.
     const block = document.querySelector(`[data-day-date="${day.date}"]`);
     const mapWrap = block && block.querySelector('[data-day-map]');
     if (mapWrap) renderDayMap(mapWrap, day);
   },
+  fetchPlaces: (dayDate, body, opts) => store.fetchPlaces(activeBoardId, dayDate, body, opts),
 });
 
 // ---------- Password gate ----------
@@ -123,6 +126,7 @@ async function refreshSidebar() {
 }
 
 async function loadActiveBoard() {
+  resetPlacesCache();
   if (!activeBoardId) {
     currentData = null;
     document.getElementById('trip-title').textContent = 'Trello → 旅行社行程表';

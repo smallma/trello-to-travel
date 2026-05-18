@@ -13,17 +13,94 @@ export function hasMapsKey() {
 }
 
 /**
- * From a list of items, derive a list of waypoint query strings.
- * Prefer `place` (locationName / address); fall back to title (Google geocodes it well for landmarks).
- * Items without any usable text are skipped.
+ * Words that mean the card isn't a real place (overview / transit / etc).
+ * If a card title contains any of these AND has no parenthesized hint,
+ * we skip it from the route.
  */
-export function itemsToWaypoints(items) {
+const NON_PLACE = [
+  '總行程', '行程總覽', '交通', '機場接送', '住宿',
+  '購物', '逛街', '退稅', '訂票', '訂位', '預約',
+  '攻略', '推薦', '分享', '注意', '提醒', '備註',
+  'check-in', 'check in', 'checkin',
+];
+
+/**
+ * From a list of items, derive a list of waypoint query strings.
+ * Skip items that are clearly not places (overview cards, transit notes).
+ * Prefer `place` field; otherwise try to extract a clean landmark name from title.
+ */
+export function itemsToWaypoints(items, dayContext = '') {
+  const city = extractCityHint(dayContext);
   return items
     .map(it => {
-      const q = sanitize((it.place && it.place.trim()) || cleanTitle(it.title));
-      return q ? { id: it.id, q } : null;
+      const explicit = it.place && it.place.trim();
+      if (explicit) {
+        return { id: it.id, q: sanitize(explicit) };
+      }
+      const titleLower = (it.title || '').toLowerCase();
+      // Skip non-place cards unless they have a parenthesized landmark
+      const hasParen = /[(（]/.test(it.title || '');
+      if (!hasParen && NON_PLACE.some(w => titleLower.includes(w.toLowerCase()))) {
+        return null;
+      }
+      const q = sanitize(extractLandmark(it.title, city));
+      return q && q.length >= 2 ? { id: it.id, q } : null;
     })
     .filter(Boolean);
+}
+
+/**
+ * Pull a city name out of a day list name like:
+ *   "6/18 (四) 維也納" -> "維也納"
+ *   "6/22 (一) - 威尼斯 13:57離開 到16:25米蘭" -> "威尼斯"
+ *   "6/25 (四) - 佛羅倫斯 - 比薩, Outlet" -> "佛羅倫斯"
+ */
+function extractCityHint(listName) {
+  if (!listName) return '';
+  // Strip date prefix and weekday parens
+  let s = listName.replace(/^\s*\d+\/\d+\s*/, '').replace(/\([^)]*\)/g, '').trim();
+  // Take first Chinese-string chunk
+  const m = s.match(/[一-鿿]{2,}/);
+  return m ? m[0] : '';
+}
+
+/**
+ * Try to extract a clean landmark name from a Trello card title.
+ * Strategy:
+ *   1) If title has Chinese name + (English/Italian) → prefer the latin name inside parens
+ *   2) Drop leading emojis, time, meal prefixes ("午餐："), trailing notes after 👉
+ *   3) Append the city as a hint so Google disambiguates
+ */
+function extractLandmark(rawTitle, city) {
+  if (!rawTitle) return '';
+  let t = rawTitle
+    .replace(/^[🍽️🏨🚆🛍️🎫🏛️📌🎆🍝🗽✈️🍣🍔🍜🍕🍰☕🧊🥐🌭🍦🍷🚇🚌🛂🌟⭐]+\s*/g, '')
+    .replace(/\d{1,2}:\d{2}(\s*[~\-–到至]\s*\d{1,2}:\d{2})?/g, '')
+    .replace(/^(午餐|晚餐|早餐|brunch|早午餐|宵夜|下午茶)\s*[：:]\s*/i, '')
+    .replace(/【[^】]*】/g, '')   // drop 【重頭戲】etc
+    .replace(/[👉👈🌟⭐]/g, '')
+    .trim();
+
+  // Pull latin/parenthesized hint first
+  const paren = t.match(/[(（]([^)）]+)[)）]/);
+  if (paren) {
+    const inner = paren[1].trim();
+    // If the parenthesized part has latin letters, it's usually the real name
+    if (/[A-Za-zÀ-ÿ]{3,}/.test(inner)) {
+      return city ? `${inner} ${city}` : inner;
+    }
+  }
+
+  // Otherwise use the leading chunk before any punctuation/note
+  t = t
+    .split(/[，,、：:]/)[0]
+    .replace(/[(（].*$/, '')
+    .replace(/\s*已訂位.*$/, '')
+    .replace(/\s*已取消.*$/, '')
+    .trim();
+
+  if (!t) return '';
+  return city && !t.includes(city) ? `${t} ${city}` : t;
 }
 
 /**
@@ -50,16 +127,6 @@ function sanitize(s) {
   } catch {
     return '';
   }
-}
-
-function cleanTitle(t) {
-  if (!t) return '';
-  return t
-    .replace(/^[🍽️🏨🚆🛍️🎫🏛️📌🎆🍝🗽✈️🍣🍔🍜🍕🍰☕🧊🥐🌭🍦🍷]+\s*/g, '') // strip leading emojis
-    .replace(/\([^)]*\)/g, '')   // strip parentheses
-    .replace(/\d{1,2}:\d{2}/g, '') // strip times
-    .replace(/[👉👈]/g, '')
-    .trim();
 }
 
 /**

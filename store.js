@@ -48,6 +48,16 @@ export async function fetchConfig() {
   return await api('/api/config');
 }
 
+/**
+ * Ask the backend for clean place names for a given day.
+ * Backend uses MiniMax to normalize titles, with a cache + regex fallback.
+ * @returns {Promise<{source: string, places: Array<{id,q}>}>}
+ */
+export async function fetchPlaces(boardId, dayDate, body, { refresh = false } = {}) {
+  const path = `/api/boards/${encodeURIComponent(boardId)}/places/${encodeURIComponent(dayDate)}${refresh ? '?refresh=1' : ''}`;
+  return await api(path, { method: 'POST', body: JSON.stringify(body) });
+}
+
 // ---------- boards ----------
 export async function listBoards() {
   const { boards } = await api('/api/boards');

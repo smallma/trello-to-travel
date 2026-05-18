@@ -6,6 +6,8 @@ import Database from 'better-sqlite3';
 import { existsSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { createHash } from 'crypto';
+import { extractPlaces } from './llm.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || join(__dirname, 'data');
@@ -45,6 +47,15 @@ db.exec(`
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS place_cache (
+    board_id    TEXT NOT NULL,
+    day_date    TEXT NOT NULL,
+    items_hash  TEXT NOT NULL,
+    places_json TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    cached_at   INTEGER NOT NULL,
+    PRIMARY KEY (board_id, day_date)
+  );
 `);
 
 const stmt = {
@@ -65,6 +76,17 @@ const stmt = {
   clearRouteOff: db.prepare('DELETE FROM route_off WHERE board_id = ?'),
   getSetting: db.prepare('SELECT value FROM settings WHERE key = ?'),
   setSetting: db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'),
+  getPlaceCache: db.prepare('SELECT items_hash, places_json, source, cached_at FROM place_cache WHERE board_id = ? AND day_date = ?'),
+  setPlaceCache: db.prepare(`
+    INSERT INTO place_cache (board_id, day_date, items_hash, places_json, source, cached_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(board_id, day_date) DO UPDATE SET
+      items_hash = excluded.items_hash,
+      places_json = excluded.places_json,
+      source = excluded.source,
+      cached_at = excluded.cached_at
+  `),
+  clearPlaceCacheForBoard: db.prepare('DELETE FROM place_cache WHERE board_id = ?'),
 };
 
 // --- App ---
@@ -129,7 +151,9 @@ app.put('/api/boards/:id', async (c) => {
 
 // Delete board
 app.delete('/api/boards/:id', (c) => {
-  stmt.deleteBoard.run(c.req.param('id'));
+  const id = c.req.param('id');
+  stmt.clearPlaceCacheForBoard.run(id);
+  stmt.deleteBoard.run(id);
   return c.json({ ok: true });
 });
 
@@ -151,6 +175,55 @@ app.post('/api/boards/:id/route-off', async (c) => {
   if (body.off) stmt.insertRouteOff.run(boardId, body.item_id);
   else stmt.deleteRouteOff.run(boardId, body.item_id);
   return c.json({ ok: true });
+});
+
+// Places: resolve a day's items to clean geocodable place names.
+// Body: { city: "維也納", items: [{id,title,place?}, ...] }
+// Returns: { source: "cache" | "llm" | "fallback", places: [{id,q}, ...] }
+app.post('/api/boards/:id/places/:date', async (c) => {
+  const boardId = c.req.param('id');
+  const dayDate = c.req.param('date');
+  const refresh = c.req.query('refresh') === '1';
+
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'invalid json' }, 400); }
+  const items = Array.isArray(body?.items) ? body.items : [];
+  const city = typeof body?.city === 'string' ? body.city : '';
+
+  // Hash of inputs — invalidates cache when the day's items change
+  const hash = createHash('sha1')
+    .update(city + '|' + items.map(it => `${it.id}\t${it.title || ''}\t${it.place || ''}`).join('\n'))
+    .digest('hex');
+
+  if (!refresh) {
+    const cached = stmt.getPlaceCache.get(boardId, dayDate);
+    if (cached && cached.items_hash === hash) {
+      return c.json({
+        source: cached.source === 'llm' ? 'cache' : 'cache_fallback',
+        places: JSON.parse(cached.places_json),
+        cached_at: cached.cached_at,
+      });
+    }
+  }
+
+  // Try LLM
+  let places = null;
+  let source = 'llm';
+  try {
+    places = await extractPlaces(city, items);
+  } catch (e) {
+    console.warn(`[places] LLM failed for ${boardId}/${dayDate}: ${e.message}`);
+    places = null;
+  }
+
+  if (!places || places.length === 0) {
+    // Fallback: return items as-is so the client uses its regex-based extractor
+    source = 'fallback';
+    places = items.map(it => ({ id: it.id, q: (it.place || it.title || '').trim() })).filter(x => x.q);
+  }
+
+  stmt.setPlaceCache.run(boardId, dayDate, hash, JSON.stringify(places), source, Date.now());
+  return c.json({ source, places });
 });
 
 // Setting: active board id (so the same user gets the same board on any device)
