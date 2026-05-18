@@ -58,6 +58,38 @@ export async function fetchPlaces(boardId, dayDate, body, { refresh = false } = 
   return await api(path, { method: 'POST', body: JSON.stringify(body) });
 }
 
+// ---------- AI guide ----------
+export async function fetchGuide(boardId, itemId, body, { refresh = false } = {}) {
+  const path = `/api/boards/${encodeURIComponent(boardId)}/items/${encodeURIComponent(itemId)}/guide${refresh ? '?refresh=1' : ''}`;
+  return await api(path, { method: 'POST', body: JSON.stringify(body) });
+}
+
+// ---------- Hidden items ----------
+export async function fetchHidden(boardId) {
+  const { hidden } = await api(`/api/boards/${encodeURIComponent(boardId)}/hidden`);
+  return new Set(hidden || []);
+}
+export async function setHidden(boardId, itemId, hidden) {
+  await api(`/api/boards/${encodeURIComponent(boardId)}/hidden`, {
+    method: 'POST',
+    body: JSON.stringify({ item_id: itemId, hidden }),
+  });
+}
+
+// ---------- Board settings ----------
+export async function fetchBoardSettings(boardId) {
+  return await api(`/api/boards/${encodeURIComponent(boardId)}/settings`);
+}
+export async function saveBoardSettings(boardId, payload) {
+  await api(`/api/boards/${encodeURIComponent(boardId)}/settings`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+export async function clearBoardCache(boardId) {
+  await api(`/api/boards/${encodeURIComponent(boardId)}/cache`, { method: 'DELETE' });
+}
+
 // ---------- boards ----------
 export async function listBoards() {
   const { boards } = await api('/api/boards');

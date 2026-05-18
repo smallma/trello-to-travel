@@ -43,6 +43,7 @@
       <section id="toolbar" class="toolbar hidden">
         <button id="expand-all">全部展開</button>
         <button id="collapse-all">全部收合</button>
+        <button id="edit-route-toggle" title="開關後可勾選每張卡片是否加入地圖路線">☑ 編輯路線</button>
         <div class="toolbar-right">
           <label class="check-inline">
             <input id="include-extras" type="checkbox" checked>
@@ -62,6 +63,32 @@
   </div>
 
   <div id="toast" class="hidden fixed bottom-6 left-1/2 -translate-x-1/2 bg-gray-900 text-white px-5 py-2.5 rounded-full text-sm shadow-lg z-50"></div>
+
+  <!-- Settings modal -->
+  <div id="settings-modal" class="modal-overlay hidden">
+    <div class="modal-box" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <h3>⚙️ 行程設定</h3>
+        <button id="st-close" class="modal-close" title="關閉">×</button>
+      </div>
+      <div class="modal-body">
+        <label class="modal-label">行程名稱</label>
+        <input id="st-name" type="text" class="modal-input" maxlength="100">
+
+        <label class="modal-label">AI 導遊偏好 <span class="modal-hint">（會影響每張卡片的 AI 介紹角度）</span></label>
+        <textarea id="st-pref" rows="3" class="modal-input" placeholder="例：我們是 4 個朋友自由行，喜歡歷史與美食、不愛奢侈品購物"></textarea>
+
+        <label class="modal-label">已隱藏的卡片</label>
+        <div id="st-hidden-list" class="modal-list"></div>
+
+        <div class="modal-actions">
+          <button id="st-clear-cache" class="danger-soft">清除 AI 快取</button>
+          <span id="st-status" class="modal-status"></span>
+          <button id="st-save" class="primary">儲存</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <script type="module" src="app.js"></script>
 </body>

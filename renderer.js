@@ -7,17 +7,30 @@ const LABEL_COLORS = ['green','yellow','orange','red','purple','blue','sky','lim
 
 let onRouteToggleCb = null;
 let getRouteOffCb = null;
-let fetchPlacesCb = null;        // (dayDate, body, opts) => Promise<{source, places}>
-const placesCache = new Map();   // dayDate -> {source, places:[{id,q}]}
+let fetchPlacesCb = null;
+let fetchGuideCb = null;
+let onHideItemCb = null;
+let getHiddenCb = null;
+let isEditingRouteCb = () => false;
+const placesCache = new Map();
 
-export function setRouteHandlers({ onToggle, getRouteOff, fetchPlaces }) {
+export function setRouteHandlers({ onToggle, getRouteOff, fetchPlaces, fetchGuide, onHideItem, getHidden, isEditingRoute }) {
   onRouteToggleCb = onToggle;
   getRouteOffCb = getRouteOff;
   fetchPlacesCb = fetchPlaces;
+  fetchGuideCb = fetchGuide;
+  onHideItemCb = onHideItem;
+  getHiddenCb = getHidden;
+  if (isEditingRoute) isEditingRouteCb = isEditingRoute;
 }
 
 export function resetPlacesCache() {
   placesCache.clear();
+}
+
+export function refreshEditRouteMode() {
+  const editing = isEditingRouteCb();
+  document.body.classList.toggle('editing-route', editing);
 }
 
 export function renderApp(data) {
@@ -25,13 +38,25 @@ export function renderApp(data) {
   const main = document.getElementById('content');
   main.innerHTML = '';
 
+  const hidden = (getHiddenCb && getHiddenCb()) || new Set();
+
   for (const day of data.days) {
-    main.appendChild(renderDay(day));
+    const filteredDay = {
+      ...day,
+      items: day.items.filter(it => !hidden.has(it.id)),
+    };
+    main.appendChild(renderDay(filteredDay));
   }
 
   if (Object.keys(data.extras).length > 0) {
-    main.appendChild(renderExtras(data.extras));
+    const filteredExtras = {};
+    for (const [k, items] of Object.entries(data.extras)) {
+      filteredExtras[k] = items.filter(it => !hidden.has(it.id));
+    }
+    main.appendChild(renderExtras(filteredExtras));
   }
+
+  refreshEditRouteMode();
 }
 
 function renderDay(day) {
@@ -182,7 +207,7 @@ function renderTimelineRow(item, day) {
   const card = el('div', 'tl-card');
   card.dataset.itemId = item.id;
 
-  // Route checkbox (only for items that can produce a waypoint)
+  // Route checkbox — only shown when body has class "editing-route"
   const canRoute = !!((item.place && item.place.trim()) || item.title);
   if (canRoute && day) {
     const routeOff = (getRouteOffCb && getRouteOffCb()) || {};
@@ -200,6 +225,17 @@ function renderTimelineRow(item, day) {
       if (onRouteToggleCb) onRouteToggleCb(item.id, off, day);
     });
     card.appendChild(cb);
+  }
+
+  // Hover-only hide button (top-right)
+  if (onHideItemCb) {
+    const hideBtn = el('button', 'tl-card-hide', '×');
+    hideBtn.title = '從顯示中隱藏（可從設定還原）';
+    hideBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      onHideItemCb(item.id);
+    });
+    card.appendChild(hideBtn);
   }
 
   const cardInner = el('div', 'tl-card-inner');
@@ -260,9 +296,53 @@ function renderTimelineRow(item, day) {
   card.appendChild(cardInner);
 
   const extraImages = (item.images && item.images.length > 1) ? item.images.slice(1) : [];
-  const hasDetail = item.desc || (item.labels && item.labels.length) || extraImages.length > 0;
+  const guideEnabled = !!fetchGuideCb;
+  const hasDetail = item.desc || (item.labels && item.labels.length) || extraImages.length > 0 || guideEnabled;
   if (hasDetail) {
     const detail = el('div', 'tl-card-detail');
+
+    // AI guide block (lazy)
+    if (guideEnabled) {
+      const guideBox = el('div', 'tl-guide');
+      guideBox.innerHTML = `
+        <div class="tl-guide-header">
+          <span>🎙️ <strong>AI 導遊</strong></span>
+          <button class="tl-guide-refresh" title="重新生成">↻</button>
+        </div>
+        <div class="tl-guide-body"><em class="muted">點「展開更多」首次載入…</em></div>
+      `;
+      const refreshBtn = guideBox.querySelector('.tl-guide-refresh');
+      const bodyEl = guideBox.querySelector('.tl-guide-body');
+      let loaded = false;
+      const loadGuide = async (refresh = false) => {
+        bodyEl.innerHTML = '<em class="muted">⏳ AI 撰寫中（最多 60 秒）…</em>';
+        try {
+          const city = day ? extractCity(day.list_name) : '';
+          const res = await fetchGuideCb(item.id, {
+            item: { id: item.id, title: item.title, category: item.category, place: item.place, desc: item.desc },
+            city,
+          }, { refresh });
+          bodyEl.innerHTML = window.marked.parse(res.content || '');
+          const tag = res.source === 'cache' ? '快取' : 'AI';
+          bodyEl.appendChild(Object.assign(document.createElement('div'), {
+            className: 'tl-guide-meta',
+            textContent: '— ' + tag,
+          }));
+          loaded = true;
+        } catch (e) {
+          bodyEl.innerHTML = `<em class="muted">⚠️ 載入失敗：${escape(e.message)}</em>`;
+        }
+      };
+      refreshBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        loadGuide(true);
+      });
+      // Lazy: trigger on first expand
+      const trigger = () => { if (!loaded) loadGuide(false); };
+      card.addEventListener('cardExpanded', trigger, { once: false });
+      detail.appendChild(guideBox);
+    }
+
     if (item.desc) {
       const md = el('div', 'markdown');
       md.innerHTML = window.marked.parse(stripBareUrls(item.desc));
@@ -305,6 +385,7 @@ function renderTimelineRow(item, day) {
       e.stopPropagation();
       const expanded = card.classList.toggle('expanded');
       toggle.textContent = expanded ? '收合 ▴' : '展開更多 ▾';
+      if (expanded) card.dispatchEvent(new CustomEvent('cardExpanded'));
     });
     card.appendChild(toggle);
   }

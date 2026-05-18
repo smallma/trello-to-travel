@@ -99,3 +99,89 @@ function normalize(arr) {
     .map(x => ({ id: x.id, q: x.q.trim() }))
     .filter(x => x.q.length > 0);
 }
+
+// ============================================================================
+// AI Tour Guide
+// ============================================================================
+
+const GUIDE_PROMPTS = {
+  sight: '你是專業導遊。請用中文介紹「{TITLE}」，內容包含：\n📜 故事 / 歷史背景（2-3 句）\n👀 必看亮點（3-5 項列點）\n⚠️ 注意事項（2-3 項列點，如人潮、攝影限制、適合時間）\n💡 在地小訣竅（1-2 項，如最佳拍照角度、隱藏入口）',
+  food: '你是在地美食家。請用中文介紹餐廳「{TITLE}」，內容包含：\n🍽️ 招牌菜 / 必點（3-5 項）\n💰 大致預算 / CP 值\n⚠️ 注意（訂位難度、忌諱、用餐時段）\n💡 點餐小訣竅（如該怎麼點、能否拼桌）',
+  hotel: '你是旅遊住宿達人。請用中文介紹住宿「{TITLE}」，內容包含：\n🏨 房型 / 設施重點（3-5 項）\n📍 周邊地理（離地鐵站、景點多遠）\n⚠️ 注意事項（check-in 時間、停車、城市稅、有無早餐）\n💡 訂房 / 入住小撇步',
+  transit: '你是交通達人。請用中文介紹交通安排「{TITLE}」，內容包含：\n🚆 路線重點 / 班次特性\n💰 票價 / 預訂建議\n⚠️ 注意事項（誤點機率、上下車站名、行李限制）\n💡 在地搭乘小撇步',
+  shop: '你是購物嚮導。請用中文介紹購物地點「{TITLE}」：\n🛍️ 必買 / 特色商品（3-5 項）\n💰 價格水位 / 退稅\n⚠️ 容易踩雷的東西（不建議買、品質落差大、假貨）\n💡 殺價 / 退稅小訣竅',
+  ticket: '你是票券達人。請用中文介紹票券「{TITLE}」：\n🎫 票券內容 / 包含項目\n💰 票價建議與不同方案差別\n⚠️ 訂購注意（最佳預訂時機、能不能改期、現場買價差）\n💡 使用上的小撇步',
+  other: '你是專業導遊。請用中文介紹「{TITLE}」，給出 3-5 段實用的提醒或建議，包含值得注意的細節、在地小訣竅。',
+};
+
+/**
+ * Generate a tour-guide-style writeup for a single itinerary item.
+ * @param {object} item - {id, title, category, place?, desc?}
+ * @param {string} city - city hint, e.g. "維也納"
+ * @param {string} preference - free-form board-level preference, may be empty
+ * @returns {Promise<string>} markdown content
+ */
+export async function generateGuide(item, city, preference) {
+  const apiKey = process.env.MINIMAX_API_KEY;
+  if (!apiKey) throw new Error('MINIMAX_API_KEY not set');
+
+  const type = item?.category?.type || 'other';
+  const tmpl = GUIDE_PROMPTS[type] || GUIDE_PROMPTS.other;
+  const base = tmpl.replace('{TITLE}', item.title || '此行程');
+
+  const extra = [];
+  if (city) extra.push(`城市：${city}`);
+  if (item.place) extra.push(`地點：${item.place}`);
+  if (item.desc) extra.push(`卡片上的備註：${truncate(item.desc, 400)}`);
+  if (preference) extra.push(`旅人偏好：${preference}`);
+
+  const system = `${base}
+
+要求：
+- 全程使用繁體中文
+- 不要任何前言或客套（例如不要說「好的」「以下是」）
+- 用 emoji 標題分段，內容用條列或短句
+- 總長度 200-350 字
+- 如果不熟悉這個地點/餐廳，誠實說「資訊有限，建議查當地最新評論」，不要亂編
+- 根據旅人偏好調整重點（若提供）`;
+
+  const user = extra.join('\n') || '請依標題介紹';
+
+  const body = {
+    model: process.env.MINIMAX_MODEL || 'MiniMax-M2.7',
+    max_tokens: 800,
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: user },
+    ],
+  };
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`MiniMax ${res.status}: ${text.slice(0, 300)}`);
+  }
+  const data = await res.json();
+  const text = data?.choices?.[0]?.message?.content || '';
+  return text.trim();
+}
+
+function truncate(s, n) {
+  if (!s) return '';
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
