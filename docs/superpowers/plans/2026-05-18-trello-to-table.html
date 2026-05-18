@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>Trello → 行程表 — Implementation Plan</title>
+<style>
+  :root { --bg:#FAFAF7; --ink:#1f2937; --muted:#6b7280; --brand:#2D5A4E; --accent:#E07856; --line:#e5e7eb; --code-bg:#f5f5f0; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: -apple-system, "PingFang TC", "Noto Sans TC", sans-serif; line-height: 1.7; font-size: 15px; }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 40px 32px 96px; }
+  header.doc { border-bottom: 3px solid var(--brand); padding-bottom: 16px; margin-bottom: 28px; }
+  header.doc h1 { font-family: "Noto Serif TC", serif; color: var(--brand); font-size: 26px; margin: 0 0 6px; }
+  header.doc .meta { color: var(--muted); font-size: 13.5px; }
+  h2 { font-family: "Noto Serif TC", serif; color: var(--brand); border-left: 4px solid var(--brand); padding-left: 12px; margin-top: 44px; font-size: 22px; }
+  h3 { color: #374151; font-size: 16.5px; margin-top: 26px; }
+  h4 { color: #4b5563; margin: 18px 0 6px; }
+  p, li { color: #1f2937; }
+  ul, ol { padding-left: 22px; }
+  li { margin: 3px 0; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0 20px; font-size: 14px; background: #fff; border-radius: 6px; overflow: hidden; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+  th, td { border: 1px solid var(--line); padding: 8px 12px; text-align: left; vertical-align: top; }
+  th { background: #f3f4f0; font-weight: 600; color: var(--brand); }
+  code { background: var(--code-bg); padding: 2px 5px; border-radius: 3px; font-family: "JetBrains Mono", "SF Mono", Menlo, monospace; font-size: 13px; color: #b6346c; }
+  pre { background: #1f2937; color: #f3f4f6; padding: 14px 16px; border-radius: 8px; overflow-x: auto; font-size: 12.5px; line-height: 1.55; }
+  pre code { background: transparent; color: inherit; padding: 0; font-size: 12.5px; }
+  .task { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 20px 24px; margin: 24px 0; box-shadow: 0 1px 2px rgba(0,0,0,.03); }
+  .task h2 { margin-top: 0; border-left: none; padding-left: 0; color: var(--accent); font-size: 19px; }
+  .task .files { background: #f9fafb; padding: 10px 14px; border-radius: 6px; font-size: 13.5px; margin-bottom: 14px; }
+  .task .files strong { color: var(--brand); }
+  .step { border-left: 3px solid #d1d5db; padding: 4px 0 4px 14px; margin: 14px 0; }
+  .step.cmd { border-left-color: var(--accent); }
+  .toc { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 14px 20px; margin-bottom: 28px; }
+  .toc ol { margin: 4px 0 0; }
+  .toc a { color: var(--brand); text-decoration: none; }
+  .toc a:hover { color: var(--accent); text-decoration: underline; }
+  .note { background: #fffbeb; border-left: 4px solid #f59e0b; padding: 10px 14px; border-radius: 4px; margin: 14px 0; color: #78350f; font-size: 13.5px; }
+  .checkbox::before { content: "☐ "; color: #9ca3af; font-size: 14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="doc">
+  <h1>Trello → 旅行社風行程表 Implementation Plan</h1>
+  <div class="meta">
+    <strong>日期：</strong>2026-05-18 ·
+    <strong>對應 Spec：</strong><code>docs/superpowers/specs/2026-05-18-trello-to-table-design.md</code>
+  </div>
+</header>
+
+<div class="note">
+  <strong>Goal：</strong>建立純前端網頁，上傳 Trello 匯出 JSON → 渲染成旅行社風格行程表 → 一鍵複製結構化 JSON 給 LLM。<br>
+  <strong>Architecture：</strong>三大模組（parser / renderer / exporter）+ app.js 黏合層。純靜態、無 build、不上傳。<br>
+  <strong>Tech：</strong>HTML5 + Tailwind CDN + Vanilla JS + marked.js + Noto Serif/Sans TC + Vercel preview。
+</div>
+
+<nav class="toc">
+  <strong style="color:var(--brand)">任務目錄</strong>
+  <ol>
+    <li><a href="#t1">Task 1：建立專案骨架與基本 HTML</a></li>
+    <li><a href="#t2">Task 2：建立 parser.js（TDD）</a></li>
+    <li><a href="#t3">Task 3：建立 exporter.js（TDD）</a></li>
+    <li><a href="#t4">Task 4：建立 renderer.js</a></li>
+    <li><a href="#t5">Task 5：串接 app.js（上傳→渲染→複製）</a></li>
+    <li><a href="#t6">Task 6：撰寫推廣型 README.md</a></li>
+    <li><a href="#t7">Task 7：部署到 Vercel preview</a></li>
+  </ol>
+</nav>
+
+<h2>檔案結構</h2>
+<pre><code>trello-to-table/
+├── index.html              主頁面
+├── style.css               自訂樣式
+├── app.js                  入口 + UI 互動
+├── parser.js               Trello JSON → 內部結構
+├── renderer.js             內部結構 → DOM
+├── exporter.js             內部結構 → 給 LLM 的 JSON
+├── tests.html              測試 runner
+├── tests/
+│   ├── parser.test.js
+│   └── exporter.test.js
+├── trello.json             範例資料
+├── README.md               推廣型說明（最後寫）
+└── docs/superpowers/
+    ├── specs/2026-05-18-trello-to-table-design.md
+    ├── specs/2026-05-18-trello-to-table-design.html
+    ├── plans/2026-05-18-trello-to-table.md
+    └── plans/2026-05-18-trello-to-table.html  ← 本檔</code></pre>
+
+<div class="task" id="t1">
+  <h2>Task 1：建立專案骨架與基本 HTML</h2>
+  <div class="files"><strong>Files:</strong> Create <code>index.html</code>, <code>style.css</code>, <code>app.js</code></div>
+  <p>建立 HTML 骨架（Header + Toolbar + Main 區），引入 Tailwind CDN、Noto 字體、marked.js。<code>style.css</code> 定義配色變數、卡片動畫、標籤色票。<code>app.js</code> 暫時只接 file input 事件，console log 確認可運作。</p>
+  <p><strong>驗收：</strong>打開 <code>index.html</code> 看到深綠 Header、可選檔案、console 看到 log。</p>
+  <p><strong>Commit：</strong><code>feat: scaffold static page with upload UI</code></p>
+</div>
+
+<div class="task" id="t2">
+  <h2>Task 2：建立 parser.js（TDD）</h2>
+  <div class="files"><strong>Files:</strong> Create <code>parser.js</code>, <code>tests.html</code>, <code>tests/parser.test.js</code></div>
+  <p>先建立極簡的瀏覽器測試 runner（<code>tests.html</code> 提供 <code>test/assert/assertEq/group</code> 全域函式）。<br>寫 <strong>11 個</strong>單元測試覆蓋：</p>
+  <ul>
+    <li>輸入驗證（null、缺欄位 throw）</li>
+    <li>回傳結構（trip / days / extras / warnings）</li>
+    <li>日期清單依月日排序</li>
+    <li>過濾 closed lists / cards</li>
+    <li>卡片依 pos 升冪</li>
+    <li>非日期清單分到 extras</li>
+    <li>欄位映射（name → title, desc, locationName/address → place, labels, attachments）</li>
+    <li>無日期清單時放 warning</li>
+  </ul>
+  <p>測試先紅 → 寫實作 → 測試全綠。最後用真實 <code>trello.json</code> 在 console 跑一次煙霧測試。</p>
+  <p><strong>Commit：</strong><code>feat: add parser for Trello board JSON</code></p>
+</div>
+
+<div class="task" id="t3">
+  <h2>Task 3：建立 exporter.js（TDD）</h2>
+  <div class="files"><strong>Files:</strong> Create <code>exporter.js</code>, <code>tests/exporter.test.js</code></div>
+  <p>純函式 <code>toCopyJson(data, {includeExtras})</code> → 回傳格式化 JSON 字串。<strong>5 個測試</strong>覆蓋：</p>
+  <ul>
+    <li>includeExtras=true 時含 extras key</li>
+    <li>includeExtras=false 時<strong>不含</strong> extras key</li>
+    <li>必要欄位：trip, exported_at(ISO 格式), days</li>
+    <li>items 欄位完整保留</li>
+    <li>輸出格式化（含換行縮排）</li>
+  </ul>
+  <p><strong>Commit：</strong><code>feat: add JSON exporter for LLM consumption</code></p>
+</div>
+
+<div class="task" id="t4">
+  <h2>Task 4：建立 renderer.js</h2>
+  <div class="files"><strong>Files:</strong> Create <code>renderer.js</code></div>
+  <p>純 DOM 操作。函式：</p>
+  <ul>
+    <li><code>renderApp(data)</code> — 更新標題 + 渲染每日區塊 + 補充資訊</li>
+    <li><code>renderDay(day)</code> — 日期區塊頭（可收合）+ 卡片列表</li>
+    <li><code>renderCard(item)</code> — 卡片標題、第一行預覽、可展開細節區（Markdown 渲染、地點、附件、標籤）</li>
+    <li><code>renderExtras(extras)</code> — 補充資訊區（預設收起）</li>
+  </ul>
+  <p>所有點擊行為都用 <code>classList.toggle</code> 切換狀態 class，動畫交給 CSS。</p>
+  <p><strong>Commit：</strong><code>feat: add DOM renderer for parsed data</code></p>
+</div>
+
+<div class="task" id="t5">
+  <h2>Task 5：串接 app.js（上傳→渲染→複製）</h2>
+  <div class="files"><strong>Files:</strong> Modify <code>app.js</code></div>
+  <p>把三大模組串起來。事件：</p>
+  <ul>
+    <li>檔案上傳 → 驗副檔名 → 讀取 → parse → render → 顯示 toolbar</li>
+    <li>全部展開 / 全部收合按鈕</li>
+    <li>複製按鈕（含 includeExtras 勾選狀態，及 HTTPS / fallback execCommand）</li>
+    <li>錯誤 banner（紅 / 黃）、底部 toast 提示</li>
+  </ul>
+  <p><strong>手動驗收（清單在 plan）</strong>：</p>
+  <ul>
+    <li>真實 trello.json 上傳，所有區塊與卡片正常</li>
+    <li>展開/收合互動正確</li>
+    <li>複製出來的 JSON 在編輯器中是合法格式</li>
+    <li>取消勾選補充資訊後複製，輸出不含 extras</li>
+    <li>三種錯誤情境（非 JSON / parse 失敗 / 缺欄位）正確顯示 banner</li>
+  </ul>
+  <p><strong>Commit：</strong><code>feat: wire up upload, render, copy flow</code></p>
+</div>
+
+<div class="task" id="t6">
+  <h2>Task 6：撰寫推廣型 README.md</h2>
+  <div class="files"><strong>Files:</strong> Create <code>README.md</code></div>
+  <p>行銷風 README（Markdown 例外，給 GitHub 顯示）。章節：</p>
+  <ol>
+    <li>一句話定位 + emoji</li>
+    <li>「你是不是也這樣？」痛點</li>
+    <li>三大特色（AI-Ready JSON / 純前端不上傳 / 旅行社級排版）</li>
+    <li>30 秒上手</li>
+    <li>本機跑（一行 open）</li>
+    <li>Vercel 部署（兩行 npm i + vercel）</li>
+    <li>對比表：直接貼 Trello JSON vs 本工具輸出</li>
+    <li>Roadmap（歡迎 PR）</li>
+    <li>MIT License</li>
+  </ol>
+  <p><strong>Commit：</strong><code>docs: add promotional README</code></p>
+</div>
+
+<div class="task" id="t7">
+  <h2>Task 7：部署到 Vercel preview</h2>
+  <div class="files"><strong>Files:</strong> 無新檔</div>
+  <ol>
+    <li>確認 Vercel CLI 已裝（<code>vercel --version</code>）</li>
+    <li>在專案根目錄執行 <code>vercel</code>，互動式設定（皆用預設）</li>
+    <li>得到 <code>xxx.vercel.app</code> preview URL，回報給使用者驗證</li>
+    <li><strong>不</strong>加 <code>--prod</code></li>
+  </ol>
+</div>
+
+<h2>執行模式</h2>
+<p>Plan 已完成，請選擇執行方式：</p>
+<table>
+  <thead><tr><th>選項</th><th>說明</th></tr></thead>
+  <tbody>
+    <tr><td><strong>1. Subagent-Driven（推薦）</strong></td><td>每個 task 派一個 fresh subagent 執行 + 兩階段 review，主對話不被 implementation 細節塞滿</td></tr>
+    <tr><td><strong>2. Inline Execution</strong></td><td>在當前 session 連續執行 tasks，每 task 完成 checkpoint 給你看</td></tr>
+  </tbody>
+</table>
+
+</div>
+</body>
+</html>

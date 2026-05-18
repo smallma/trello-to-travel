@@ -1,0 +1,17 @@
+{
+  "name": "trello-to-table-server",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.7",
+    "better-sqlite3": "^11.3.0",
+    "hono": "^4.6.13"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

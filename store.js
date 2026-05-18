@@ -1,0 +1,129 @@
+// store.js
+// Talks to the backend API. Uses localStorage only for the password and a small
+// metadata cache; full board payloads are fetched on demand.
+
+const PW_KEY = 'trello-to-table.password';
+const CACHE_KEY = 'trello-to-table.cache.v1';
+const ACTIVE_KEY = 'trello-to-table.active';
+
+const API_BASE = ''; // same-origin
+
+// ---------- password ----------
+export function getPassword() {
+  return localStorage.getItem(PW_KEY) || '';
+}
+export function setPassword(pw) {
+  localStorage.setItem(PW_KEY, pw);
+}
+export function clearPassword() {
+  localStorage.removeItem(PW_KEY);
+}
+
+// ---------- generic fetch ----------
+async function api(path, init = {}) {
+  const headers = new Headers(init.headers || {});
+  headers.set('X-API-Password', getPassword());
+  if (init.body && !headers.has('content-type')) {
+    headers.set('content-type', 'application/json');
+  }
+  const res = await fetch(API_BASE + path, { ...init, headers });
+  if (res.status === 401) {
+    const err = new Error('密碼不正確');
+    err.status = 401;
+    throw err;
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`API ${res.status}: ${text || res.statusText}`);
+  }
+  return res.status === 204 ? null : await res.json();
+}
+
+export async function checkPassword() {
+  await api('/api/auth/check', { method: 'POST' });
+  return true;
+}
+
+export async function fetchConfig() {
+  return await api('/api/config');
+}
+
+// ---------- boards ----------
+export async function listBoards() {
+  const { boards } = await api('/api/boards');
+  return boards.map(b => ({
+    id: b.id,
+    name: b.name,
+    importedAt: b.imported_at,
+    updatedAt: b.updated_at,
+  }));
+}
+
+export async function getBoard(id) {
+  const data = await api(`/api/boards/${encodeURIComponent(id)}`);
+  return { id: data.id, name: data.name, raw: data.raw, importedAt: data.imported_at };
+}
+
+export async function addBoard(raw) {
+  const id = (raw.shortLink || raw.id || ('b_' + Date.now())) + '';
+  await api(`/api/boards/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ raw }),
+  });
+  return { id, name: raw.name || '未命名行程' };
+}
+
+export async function deleteBoard(id) {
+  await api(`/api/boards/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+// ---------- active board (per-account, synced across devices) ----------
+export async function getActiveId() {
+  try {
+    const { active_board_id } = await api('/api/settings/active');
+    return active_board_id;
+  } catch {
+    return localStorage.getItem(ACTIVE_KEY);
+  }
+}
+export async function setActiveId(id) {
+  localStorage.setItem(ACTIVE_KEY, id || '');
+  try {
+    await api('/api/settings/active', {
+      method: 'PUT',
+      body: JSON.stringify({ active_board_id: id || '' }),
+    });
+  } catch {}
+}
+
+// ---------- route off ----------
+const routeOffCache = new Map(); // boardId -> { itemId: true }
+
+export async function loadRouteOff(boardId) {
+  if (!boardId) return {};
+  try {
+    const { route_off } = await api(`/api/boards/${encodeURIComponent(boardId)}/route-off`);
+    routeOffCache.set(boardId, route_off || {});
+    return route_off || {};
+  } catch {
+    return routeOffCache.get(boardId) || {};
+  }
+}
+
+export function getRouteOff(boardId) {
+  return routeOffCache.get(boardId) || {};
+}
+
+export async function setRouteOff(boardId, itemId, off) {
+  const current = routeOffCache.get(boardId) || {};
+  if (off) current[itemId] = true; else delete current[itemId];
+  routeOffCache.set(boardId, current);
+  try {
+    await api(`/api/boards/${encodeURIComponent(boardId)}/route-off`, {
+      method: 'POST',
+      body: JSON.stringify({ item_id: itemId, off }),
+    });
+  } catch (e) {
+    console.warn('route-off sync failed:', e.message);
+  }
+}

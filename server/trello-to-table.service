@@ -1,0 +1,19 @@
+[Unit]
+Description=Trello to Table API
+After=network.target
+
+[Service]
+Type=simple
+User=trello
+Group=trello
+WorkingDirectory=/opt/trello-to-table/server
+EnvironmentFile=/etc/trello-to-table.env
+ExecStart=/usr/bin/node index.js
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

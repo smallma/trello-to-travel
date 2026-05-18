@@ -1,0 +1,18 @@
+node_modules/
+.vercel/
+.vercel
+.DS_Store
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+server/.env
+server/.env.*
+!server/.env.example
+
+# Local data
+server/data/
+*.db
+*.db-journal
+*.db-wal
