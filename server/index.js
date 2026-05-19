@@ -14,14 +14,10 @@ const DATA_DIR = process.env.DATA_DIR || join(__dirname, 'data');
 const PORT = parseInt(process.env.PORT || '5566', 10);
 const PASSWORD = process.env.API_PASSWORD;
 const STATIC_DIR = process.env.STATIC_DIR || join(__dirname, '..');
-const GOOGLE_MAPS_KEY = process.env.GOOGLE_MAPS_KEY || '';
 
 if (!PASSWORD) {
   console.error('FATAL: API_PASSWORD env var is required.');
   process.exit(1);
-}
-if (!GOOGLE_MAPS_KEY) {
-  console.warn('WARN: GOOGLE_MAPS_KEY is empty — map embeds will not work.');
 }
 
 if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
@@ -74,6 +70,30 @@ db.exec(`
     key      TEXT NOT NULL,
     value    TEXT NOT NULL,
     PRIMARY KEY (board_id, key)
+  );
+  CREATE TABLE IF NOT EXISTS custom_items (
+    id          TEXT PRIMARY KEY,
+    board_id    TEXT NOT NULL,
+    day_date    TEXT NOT NULL,
+    payload     TEXT NOT NULL,
+    pos         REAL NOT NULL,
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_custom_items_board_day ON custom_items(board_id, day_date);
+  CREATE TABLE IF NOT EXISTS item_overrides (
+    board_id TEXT NOT NULL,
+    item_id  TEXT NOT NULL,
+    payload  TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (board_id, item_id)
+  );
+  CREATE TABLE IF NOT EXISTS geocode_cache (
+    q          TEXT PRIMARY KEY,
+    lat        REAL NOT NULL,
+    lng        REAL NOT NULL,
+    display    TEXT,
+    cached_at  INTEGER NOT NULL
   );
 `);
 
@@ -130,6 +150,42 @@ const stmt = {
   `),
   clearBoardSettings: db.prepare('DELETE FROM board_settings WHERE board_id = ?'),
   renameBoard: db.prepare('UPDATE boards SET name = ?, updated_at = ? WHERE id = ?'),
+
+  // Custom items
+  listCustomItems: db.prepare('SELECT id, day_date, payload, pos FROM custom_items WHERE board_id = ? ORDER BY day_date, pos'),
+  listCustomItemsForDay: db.prepare('SELECT id, payload, pos FROM custom_items WHERE board_id = ? AND day_date = ? ORDER BY pos'),
+  getCustomItem: db.prepare('SELECT id, board_id, day_date, payload, pos FROM custom_items WHERE id = ?'),
+  insertCustomItem: db.prepare(`
+    INSERT INTO custom_items (id, board_id, day_date, payload, pos, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `),
+  updateCustomItem: db.prepare('UPDATE custom_items SET payload = ?, pos = ?, day_date = ?, updated_at = ? WHERE id = ?'),
+  deleteCustomItem: db.prepare('DELETE FROM custom_items WHERE id = ?'),
+  clearCustomItemsForBoard: db.prepare('DELETE FROM custom_items WHERE board_id = ?'),
+  maxPosForDay: db.prepare('SELECT MAX(pos) AS m FROM custom_items WHERE board_id = ? AND day_date = ?'),
+
+  // Item overrides (for editing Trello cards without mutating raw)
+  listOverrides: db.prepare('SELECT item_id, payload FROM item_overrides WHERE board_id = ?'),
+  getOverride: db.prepare('SELECT payload FROM item_overrides WHERE board_id = ? AND item_id = ?'),
+  upsertOverride: db.prepare(`
+    INSERT INTO item_overrides (board_id, item_id, payload, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(board_id, item_id) DO UPDATE SET
+      payload = excluded.payload,
+      updated_at = excluded.updated_at
+  `),
+  deleteOverride: db.prepare('DELETE FROM item_overrides WHERE board_id = ? AND item_id = ?'),
+  clearOverridesForBoard: db.prepare('DELETE FROM item_overrides WHERE board_id = ?'),
+
+  // Geocode cache
+  getGeo: db.prepare('SELECT lat, lng, display, cached_at FROM geocode_cache WHERE q = ?'),
+  setGeo: db.prepare(`
+    INSERT INTO geocode_cache (q, lat, lng, display, cached_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(q) DO UPDATE SET
+      lat = excluded.lat, lng = excluded.lng,
+      display = excluded.display, cached_at = excluded.cached_at
+  `),
 };
 
 // --- App ---
@@ -149,9 +205,9 @@ app.get('/api/ping', (c) => c.json({ ok: true }));
 
 app.post('/api/auth/check', (c) => c.json({ ok: true })); // returns 200 only if middleware passed
 
-// Frontend config (Maps API key etc) — only handed out after password check
+// Frontend config — no secrets needed now (Leaflet uses OSM, no key)
 app.get('/api/config', (c) => c.json({
-  google_maps_key: GOOGLE_MAPS_KEY,
+  map: 'leaflet',
 }));
 
 // List boards (metadata only)
@@ -199,6 +255,8 @@ app.delete('/api/boards/:id', (c) => {
   stmt.clearGuideCacheForBoard.run(id);
   stmt.clearHiddenForBoard.run(id);
   stmt.clearBoardSettings.run(id);
+  stmt.clearCustomItemsForBoard.run(id);
+  stmt.clearOverridesForBoard.run(id);
   stmt.deleteBoard.run(id);
   return c.json({ ok: true });
 });
@@ -365,6 +423,121 @@ function boardSettingsObj(boardId) {
   const obj = {};
   for (const r of rows) obj[r.key] = r.value;
   return obj;
+}
+
+// ===== Custom items =====
+// List all custom items + overrides for a board (consumed by parser/merger).
+app.get('/api/boards/:id/extras', (c) => {
+  const id = c.req.param('id');
+  const custom = stmt.listCustomItems.all(id).map(r => ({
+    id: r.id, day_date: r.day_date, pos: r.pos, ...JSON.parse(r.payload),
+  }));
+  const overrides = {};
+  for (const r of stmt.listOverrides.all(id)) {
+    overrides[r.item_id] = JSON.parse(r.payload);
+  }
+  return c.json({ custom, overrides });
+});
+
+// Create a custom item for a specific day.
+app.post('/api/boards/:id/days/:date/items', async (c) => {
+  const boardId = c.req.param('id');
+  const dayDate = c.req.param('date');
+  const body = await c.req.json();
+  if (!body || typeof body !== 'object' || !body.title) {
+    return c.json({ error: 'title required' }, 400);
+  }
+  const id = 'cust_' + Math.random().toString(36).slice(2, 12);
+  const maxRow = stmt.maxPosForDay.get(boardId, dayDate);
+  const pos = (maxRow?.m || 0) + 1024;
+  const payload = sanitizeItemPayload(body);
+  const now = Date.now();
+  stmt.insertCustomItem.run(id, boardId, dayDate, JSON.stringify(payload), pos, now, now);
+  return c.json({ ok: true, id });
+});
+
+// Update a custom item or override a Trello item.
+app.put('/api/boards/:id/items/:itemId', async (c) => {
+  const boardId = c.req.param('id');
+  const itemId = c.req.param('itemId');
+  const body = await c.req.json();
+  const payload = sanitizeItemPayload(body || {});
+  const existingCustom = stmt.getCustomItem.get(itemId);
+  if (existingCustom && existingCustom.board_id === boardId) {
+    const dayDate = (typeof body?.day_date === 'string') ? body.day_date : existingCustom.day_date;
+    stmt.updateCustomItem.run(JSON.stringify(payload), existingCustom.pos, dayDate, Date.now(), itemId);
+  } else {
+    stmt.upsertOverride.run(boardId, itemId, JSON.stringify(payload), Date.now());
+  }
+  return c.json({ ok: true });
+});
+
+// Delete a custom item, or clear an override on a Trello item.
+app.delete('/api/boards/:id/items/:itemId', (c) => {
+  const boardId = c.req.param('id');
+  const itemId = c.req.param('itemId');
+  const existingCustom = stmt.getCustomItem.get(itemId);
+  if (existingCustom && existingCustom.board_id === boardId) {
+    stmt.deleteCustomItem.run(itemId);
+  } else {
+    stmt.deleteOverride.run(boardId, itemId);
+  }
+  return c.json({ ok: true });
+});
+
+function sanitizeItemPayload(input) {
+  const out = {};
+  if (input.title) out.title = String(input.title).slice(0, 200);
+  if (input.desc) out.desc = String(input.desc).slice(0, 4000);
+  if (input.category) out.category = input.category;
+  if (input.time_start) out.time_start = String(input.time_start).slice(0, 10);
+  if (input.time_end) out.time_end = String(input.time_end).slice(0, 10);
+  if (input.place) out.place = String(input.place).slice(0, 200);
+  if (Array.isArray(input.links)) out.links = input.links.filter(s => typeof s === 'string').slice(0, 10);
+  if (Array.isArray(input.images)) out.images = input.images
+    .filter(im => im && typeof im.thumb === 'string')
+    .map(im => ({ thumb: im.thumb, full: im.full || im.thumb, name: im.name || '' }))
+    .slice(0, 20);
+  if (Array.isArray(input.labels)) out.labels = input.labels;
+  return out;
+}
+
+// ===== Geocode proxy =====
+// Look up a place query and return cached/fresh lat/lng. Uses Nominatim.
+app.get('/api/geocode', async (c) => {
+  const q = (c.req.query('q') || '').trim();
+  if (!q) return c.json({ error: 'q required' }, 400);
+  const cached = stmt.getGeo.get(q);
+  if (cached) {
+    return c.json({ q, lat: cached.lat, lng: cached.lng, display: cached.display, source: 'cache' });
+  }
+  await rateLimitNominatim();
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`;
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'trello-to-travel/1.0 (private use)' },
+    });
+    if (!res.ok) return c.json({ error: 'nominatim ' + res.status }, 502);
+    const arr = await res.json();
+    if (!Array.isArray(arr) || arr.length === 0) {
+      return c.json({ q, lat: null, lng: null, source: 'miss' });
+    }
+    const lat = parseFloat(arr[0].lat);
+    const lng = parseFloat(arr[0].lon);
+    const display = arr[0].display_name || '';
+    stmt.setGeo.run(q, lat, lng, display, Date.now());
+    return c.json({ q, lat, lng, display, source: 'nominatim' });
+  } catch (e) {
+    return c.json({ error: e.message }, 502);
+  }
+});
+
+let _lastNominatim = 0;
+async function rateLimitNominatim() {
+  const now = Date.now();
+  const wait = Math.max(0, _lastNominatim + 1100 - now);
+  if (wait > 0) await new Promise(r => setTimeout(r, wait));
+  _lastNominatim = Date.now();
 }
 
 // Setting: active board id (so the same user gets the same board on any device)

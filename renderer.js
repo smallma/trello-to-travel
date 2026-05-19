@@ -1,7 +1,7 @@
 // renderer.js
 // Vertical-timeline renderer with per-card route checkboxes and per-day Google Maps embed.
 
-import { itemsToWaypoints, buildEmbedUrl, buildOpenUrl, hasMapsKey } from './maps.js';
+import { itemsToWaypoints, buildOpenUrl } from './maps.js';
 
 const LABEL_COLORS = ['green','yellow','orange','red','purple','blue','sky','lime','pink','black'];
 
@@ -10,18 +10,28 @@ let getRouteOffCb = null;
 let fetchPlacesCb = null;
 let fetchGuideCb = null;
 let onHideItemCb = null;
+let onDeleteItemCb = null;
+let onEditItemCb = null;
+let onAddItemCb = null;
+let isCustomCb = () => false;
 let getHiddenCb = null;
 let isEditingRouteCb = () => false;
+let geocodeCb = null;
 const placesCache = new Map();
 
-export function setRouteHandlers({ onToggle, getRouteOff, fetchPlaces, fetchGuide, onHideItem, getHidden, isEditingRoute }) {
-  onRouteToggleCb = onToggle;
-  getRouteOffCb = getRouteOff;
-  fetchPlacesCb = fetchPlaces;
-  fetchGuideCb = fetchGuide;
-  onHideItemCb = onHideItem;
-  getHiddenCb = getHidden;
-  if (isEditingRoute) isEditingRouteCb = isEditingRoute;
+export function setRouteHandlers(opts) {
+  onRouteToggleCb = opts.onToggle;
+  getRouteOffCb = opts.getRouteOff;
+  fetchPlacesCb = opts.fetchPlaces;
+  fetchGuideCb = opts.fetchGuide;
+  onHideItemCb = opts.onHideItem;
+  onDeleteItemCb = opts.onDeleteItem;
+  onEditItemCb = opts.onEditItem;
+  onAddItemCb = opts.onAddItem;
+  isCustomCb = opts.isCustom || (() => false);
+  getHiddenCb = opts.getHidden;
+  if (opts.isEditingRoute) isEditingRouteCb = opts.isEditingRoute;
+  geocodeCb = opts.geocode;
 }
 
 export function resetPlacesCache() {
@@ -70,6 +80,19 @@ function renderDay(day) {
   block.appendChild(header);
 
   const body = el('div', 'day-body');
+
+  // + 新增 button (per-day)
+  if (onAddItemCb) {
+    const addBar = el('div', 'day-add-bar');
+    const addBtn = el('button', 'day-add-btn', '+ 新增行程');
+    addBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      onAddItemCb(day);
+    });
+    addBar.appendChild(addBtn);
+    body.appendChild(addBar);
+  }
+
   const timeline = el('div', 'timeline');
   for (const item of day.items) {
     timeline.appendChild(renderTimelineRow(item, day));
@@ -91,12 +114,11 @@ function renderDay(day) {
 
 export async function renderDayMap(wrap, day, { refresh = false } = {}) {
   wrap.innerHTML = '';
-  // Loading state first
   const loading = el('div', 'day-map-header', '');
   loading.innerHTML = `<span><strong>🗺️ 路線</strong> · ⏳ 解析地點中…</span>`;
   wrap.appendChild(loading);
 
-  // Try LLM-cleaned places from backend; fall back to local regex if anything fails.
+  // Step 1: ask backend for clean place strings (LLM + cache + fallback)
   let resolved;
   try {
     if (!fetchPlacesCb) throw new Error('fetchPlaces not configured');
@@ -129,32 +151,70 @@ export async function renderDayMap(wrap, day, { refresh = false } = {}) {
     wrap.appendChild(header);
     return;
   }
-  if (waypoints.length === 1) {
-    header.innerHTML = `<span><strong>🗺️ 路線</strong> · 只有一個地點，無法畫路線 ${sourceLabel}</span>`;
-    const openUrl = buildOpenUrl(waypoints);
-    if (openUrl) appendOpenLink(header, openUrl);
-    appendRefreshBtn(header, wrap, day);
-    wrap.appendChild(header);
-    return;
-  }
 
-  header.innerHTML = `<span><strong>🗺️ 路線</strong> · 共 ${waypoints.length} 個點（依時間軸順序，可勾選/取消） ${sourceLabel}</span>`;
+  header.innerHTML = `<span><strong>🗺️ 路線</strong> · 共 ${waypoints.length} 個點（地圖點對應時間軸順序） ${sourceLabel}</span>`;
   const openUrl = buildOpenUrl(waypoints);
   if (openUrl) appendOpenLink(header, openUrl);
   appendRefreshBtn(header, wrap, day);
   wrap.appendChild(header);
 
-  if (!hasMapsKey()) {
-    wrap.appendChild(el('div', 'day-map-empty', '⚠️ 後端未設定 Google Maps API key — 內嵌地圖暫不可用。點上方「在 Google Maps 開啟 ↗」仍可查看路線。'));
+  // Step 2: render Leaflet map div, then geocode points one by one
+  const mapDiv = el('div', 'leaflet-map');
+  mapDiv.style.height = '360px';
+  wrap.appendChild(mapDiv);
+
+  const map = L.map(mapDiv, { scrollWheelZoom: false }).setView([20, 0], 2);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
+    subdomains: 'abcd',
+    maxZoom: 19,
+  }).addTo(map);
+
+  // Geocode all waypoints (parallel; backend rate-limits Nominatim)
+  const coords = [];
+  await Promise.all(waypoints.map(async (wp, i) => {
+    try {
+      const g = await geocodeCb(wp.q);
+      if (g && g.lat != null && g.lng != null) {
+        coords[i] = { lat: g.lat, lng: g.lng, label: wp.q };
+      }
+    } catch {}
+  }));
+
+  const validCoords = coords.filter(Boolean);
+  if (validCoords.length === 0) {
+    mapDiv.style.display = 'none';
+    wrap.appendChild(el('div', 'day-map-empty', '⚠️ 沒有任何地點可以定位（OSM Nominatim 查不到）。請點上方「在 Google Maps 開啟 ↗」'));
     return;
   }
 
-  const iframe = document.createElement('iframe');
-  iframe.loading = 'lazy';
-  iframe.referrerPolicy = 'no-referrer-when-downgrade';
-  iframe.allowFullscreen = true;
-  iframe.src = buildEmbedUrl(waypoints, 'driving');
-  wrap.appendChild(iframe);
+  // Numbered markers
+  validCoords.forEach((c, idx) => {
+    const realIdx = coords.indexOf(c);
+    const marker = L.marker([c.lat, c.lng], {
+      icon: numberedIcon(realIdx + 1),
+    }).addTo(map);
+    marker.bindPopup(`<strong>${realIdx + 1}.</strong> ${escape(c.label)}`);
+  });
+
+  // Polyline connecting points in order
+  L.polyline(validCoords.map(c => [c.lat, c.lng]), {
+    color: '#2D5A4E', weight: 2.5, opacity: 0.7, dashArray: '6 8',
+  }).addTo(map);
+
+  // Fit bounds
+  const group = L.featureGroup(validCoords.map(c => L.marker([c.lat, c.lng])));
+  map.fitBounds(group.getBounds(), { padding: [30, 30] });
+}
+
+function numberedIcon(n) {
+  return L.divIcon({
+    className: 'tl-marker',
+    html: `<div class="tl-marker-pin"><span>${n}</span></div>`,
+    iconSize: [28, 36],
+    iconAnchor: [14, 36],
+    popupAnchor: [0, -32],
+  });
 }
 
 function appendOpenLink(header, url) {
@@ -227,16 +287,36 @@ function renderTimelineRow(item, day) {
     card.appendChild(cb);
   }
 
-  // Hover-only hide button (top-right)
-  if (onHideItemCb) {
-    const hideBtn = el('button', 'tl-card-hide', '×');
+  // Hover-only action buttons (top-right)
+  const actions = el('div', 'tl-card-actions');
+  if (onEditItemCb) {
+    const editBtn = el('button', 'tl-card-action', '✏️');
+    editBtn.title = '編輯';
+    editBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      onEditItemCb(item, day);
+    });
+    actions.appendChild(editBtn);
+  }
+  const isCustom = isCustomCb(item.id);
+  if (isCustom && onDeleteItemCb) {
+    const delBtn = el('button', 'tl-card-action tl-card-delete', '🗑');
+    delBtn.title = '刪除這張自訂卡片';
+    delBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      onDeleteItemCb(item.id);
+    });
+    actions.appendChild(delBtn);
+  } else if (onHideItemCb) {
+    const hideBtn = el('button', 'tl-card-action', '×');
     hideBtn.title = '從顯示中隱藏（可從設定還原）';
     hideBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       onHideItemCb(item.id);
     });
-    card.appendChild(hideBtn);
+    actions.appendChild(hideBtn);
   }
+  card.appendChild(actions);
 
   const cardInner = el('div', 'tl-card-inner');
   if (item.images && item.images.length) {

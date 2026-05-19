@@ -7,6 +7,8 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@500;700&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <link rel="stylesheet" href="style.css">
 </head>
 <body class="bg-[#FAFAF7] text-gray-800 font-sans">
@@ -63,6 +65,62 @@
   </div>
 
   <div id="toast" class="hidden fixed bottom-6 left-1/2 -translate-x-1/2 bg-gray-900 text-white px-5 py-2.5 rounded-full text-sm shadow-lg z-50"></div>
+
+  <!-- Item editor modal -->
+  <div id="item-modal" class="modal-overlay hidden">
+    <div class="modal-box" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <h3 id="it-h">✏️ 編輯行程</h3>
+        <span id="it-title" class="muted"></span>
+        <button id="it-close" class="modal-close" title="關閉">×</button>
+      </div>
+      <div class="modal-body">
+        <form id="it-form" onsubmit="event.preventDefault()">
+          <label class="modal-label">標題 *</label>
+          <input id="it-fld-title" class="modal-input" required>
+
+          <label class="modal-label">類型</label>
+          <select id="it-fld-category" class="modal-input">
+            <option value="sight">🏛️ 景點</option>
+            <option value="food">🍽️ 餐廳</option>
+            <option value="hotel">🏨 住宿</option>
+            <option value="transit">🚆 交通</option>
+            <option value="shop">🛍️ 購物</option>
+            <option value="ticket">🎫 票券</option>
+            <option value="other" selected>📌 行程</option>
+          </select>
+
+          <div class="modal-row">
+            <div style="flex:1">
+              <label class="modal-label">開始時間 <span class="modal-hint">HH:MM</span></label>
+              <input id="it-fld-time-start" class="modal-input" placeholder="例 09:30">
+            </div>
+            <div style="flex:1">
+              <label class="modal-label">結束時間 <span class="modal-hint">HH:MM（可空）</span></label>
+              <input id="it-fld-time-end" class="modal-input" placeholder="例 12:00">
+            </div>
+          </div>
+
+          <label class="modal-label">地點 <span class="modal-hint">（用於地圖定位）</span></label>
+          <input id="it-fld-place" class="modal-input" placeholder="例 Stephansdom, Vienna">
+
+          <label class="modal-label">描述 / 備註</label>
+          <textarea id="it-fld-desc" class="modal-input" rows="3"></textarea>
+
+          <label class="modal-label">圖片 URL <span class="modal-hint">（單張）</span></label>
+          <input id="it-fld-image" class="modal-input" placeholder="https://...">
+
+          <label class="modal-label">相關連結 <span class="modal-hint">一行一個</span></label>
+          <textarea id="it-fld-links" class="modal-input" rows="2" placeholder="https://..."></textarea>
+
+          <div class="modal-actions">
+            <span id="it-status" class="modal-status"></span>
+            <button id="it-save" class="primary">儲存</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
 
   <!-- Settings modal -->
   <div id="settings-modal" class="modal-overlay hidden">

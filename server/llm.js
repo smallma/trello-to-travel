@@ -137,13 +137,30 @@ export async function generateGuide(item, city, preference) {
 
   const system = `${base}
 
-要求：
-- 全程使用繁體中文
-- 不要任何前言或客套（例如不要說「好的」「以下是」）
+【嚴格輸出規則】
+- 直接回答，不要任何思考過程、推理、自言自語
+- 不要說「用戶要求」「我需要」「讓我組織」這類後設語言
+- 不要 markdown code fence、不要 JSON、不要 XML 標籤
+- 全程使用「繁體中文」（不要簡體字）
+- 不要前言（不說「好的」「以下是」「沒問題」）
 - 用 emoji 標題分段，內容用條列或短句
 - 總長度 200-350 字
-- 如果不熟悉這個地點/餐廳，誠實說「資訊有限，建議查當地最新評論」，不要亂編
-- 根據旅人偏好調整重點（若提供）`;
+- 不熟悉就說「資訊有限，建議查當地最新評論」，不要亂編
+- 根據旅人偏好調整重點（若提供）
+
+【輸出範例格式】
+📜 故事
+（內容）
+
+👀 必看亮點
+- ...
+- ...
+
+⚠️ 注意事項
+- ...
+
+💡 在地小訣竅
+- ...`;
 
   const user = extra.join('\n') || '請依標題介紹';
 
@@ -178,7 +195,45 @@ export async function generateGuide(item, city, preference) {
   }
   const data = await res.json();
   const text = data?.choices?.[0]?.message?.content || '';
-  return text.trim();
+  return cleanGuideText(text);
+}
+
+/**
+ * MiniMax-M2 series are reasoning models — they often dump their internal
+ * thinking (in Simplified Chinese, with "用户要求"/"让我组织" preambles) before
+ * the actual answer. Strip everything up to the first emoji-prefixed section,
+ * which is where the user-facing content starts per our prompt template.
+ * Also convert any leftover Simplified Chinese to Traditional via a small
+ * lookup table for the most common cases.
+ */
+function cleanGuideText(raw) {
+  if (!raw) return '';
+  let text = raw
+    .replace(/^```(?:markdown|md|text)?\s*/i, '')
+    .replace(/```\s*$/i, '')
+    .trim();
+
+  // Find the first emoji-headed section. Our template starts with one of
+  // 📜 👀 ⚠️ 💡 🍽️ 🏨 🚆 🛍️ 🎫 📍 🌟 — slice from there onward.
+  const sectionStart = text.search(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u);
+  if (sectionStart > 0) {
+    // If the first ~60 chars before the emoji contain reasoning keywords, drop them.
+    const head = text.slice(0, sectionStart);
+    const reasoning = /用户|讓我|让我|我需要|首先|好的|以下是|我对|对这个/.test(head);
+    if (reasoning || sectionStart > 100) {
+      text = text.slice(sectionStart).trim();
+    }
+  }
+
+  // Remove any stray "用户要求" / "我需要組織" lines that slipped past
+  text = text
+    .split('\n')
+    .filter(line => !/^(用户要求|让我|讓我|我需要|首先|好的，|以下是我|我对|对这个|這座|建于)/.test(line.trim()))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  return text;
 }
 
 function truncate(s, n) {

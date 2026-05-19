@@ -3,7 +3,6 @@ import { parseTrello } from './parser.js';
 import { renderApp, renderDayMap, setRouteHandlers, resetPlacesCache } from './renderer.js';
 import { toCopyJson } from './exporter.js';
 import * as store from './store.js';
-import { setMapsKey } from './maps.js';
 
 const fileInput = document.getElementById('file-input');
 const toolbar = document.getElementById('toolbar');
@@ -16,6 +15,9 @@ let currentData = null;
 let activeBoardId = null;
 let hiddenIds = new Set();
 let editingRoute = false;
+let customItems = [];      // [{id, day_date, title, ...}]
+let overrides = {};        // {trelloItemId: {title, desc, ...}}
+let isCustomId = new Set();
 
 setRouteHandlers({
   getRouteOff: () => activeBoardId ? store.getRouteOff(activeBoardId) : {},
@@ -28,7 +30,10 @@ setRouteHandlers({
   },
   fetchPlaces: (dayDate, body, opts) => store.fetchPlaces(activeBoardId, dayDate, body, opts),
   fetchGuide: (itemId, body, opts) => store.fetchGuide(activeBoardId, itemId, body, opts),
+  geocode: (q) => store.geocode(q),
   getHidden: () => hiddenIds,
+  isCustom: (id) => isCustomId.has(id),
+  isEditingRoute: () => editingRoute,
   onHideItem: async (itemId) => {
     if (!activeBoardId) return;
     if (!confirm('要從顯示中隱藏這張卡片嗎？（可在設定頁還原）')) return;
@@ -36,7 +41,16 @@ setRouteHandlers({
     try { await store.setHidden(activeBoardId, itemId, true); } catch (e) { showError(e.message); }
     document.querySelector(`.tl-card[data-item-id="${itemId}"]`)?.closest('.tl-row')?.remove();
   },
-  isEditingRoute: () => editingRoute,
+  onDeleteItem: async (itemId) => {
+    if (!activeBoardId) return;
+    if (!confirm('刪除這張自訂卡片？無法復原。')) return;
+    try {
+      await store.deleteItem(activeBoardId, itemId);
+      await loadActiveBoard();
+    } catch (e) { showError('刪除失敗：' + e.message); }
+  },
+  onEditItem: (item, day) => openItemEditor({ mode: 'edit', item, day }),
+  onAddItem: (day) => openItemEditor({ mode: 'add', day }),
 });
 
 // ---------- Password gate ----------
@@ -165,16 +179,51 @@ async function loadActiveBoard() {
   try {
     const board = await store.getBoard(activeBoardId);
     const data = parseTrello(board.raw);
-    currentData = data;
     await store.loadRouteOff(activeBoardId);
     try { hiddenIds = await store.fetchHidden(activeBoardId); } catch { hiddenIds = new Set(); }
+    try {
+      const extras = await store.fetchExtras(activeBoardId);
+      customItems = extras.custom || [];
+      overrides = extras.overrides || {};
+    } catch {
+      customItems = []; overrides = {};
+    }
+    isCustomId = new Set(customItems.map(c => c.id));
+
+    // Merge custom items + apply overrides
+    const merged = mergeBoardData(data, customItems, overrides);
+    currentData = merged;
     hideBanner();
     if (data.warnings.length) showWarning(data.warnings.join('；'));
-    renderApp(data);
+    renderApp(merged);
     toolbar.classList.remove('hidden');
   } catch (err) {
     showError(err.message || '解析失敗');
   }
+}
+
+function mergeBoardData(data, customs, overrides) {
+  const byDay = new Map();
+  for (const c of customs) {
+    if (!byDay.has(c.day_date)) byDay.set(c.day_date, []);
+    byDay.get(c.day_date).push({ ...c, _custom: true });
+  }
+  const applyOverride = (it) => {
+    const ov = overrides[it.id];
+    return ov ? { ...it, ...ov } : it;
+  };
+  const days = data.days.map(day => ({
+    ...day,
+    items: [
+      ...day.items.map(applyOverride),
+      ...(byDay.get(day.date) || []),
+    ],
+  }));
+  const extras = {};
+  for (const [k, items] of Object.entries(data.extras)) {
+    extras[k] = items.map(applyOverride);
+  }
+  return { ...data, days, extras };
 }
 
 // ---------- Toolbar ----------
@@ -317,6 +366,80 @@ document.getElementById('settings-modal').addEventListener('click', (e) => {
 // Expose so sidebar can call it
 window.__openSettings = openSettings;
 
+// ---------- Item editor modal ----------
+function openItemEditor({ mode, item, day }) {
+  const modal = document.getElementById('item-modal');
+  modal.classList.remove('hidden');
+  const f = modal.querySelector('#it-form');
+  const title = modal.querySelector('#it-title');
+  const status = modal.querySelector('#it-status');
+  const h = modal.querySelector('#it-h');
+
+  h.textContent = mode === 'add' ? `+ 新增行程（${day?.list_name || ''}）` : '✏️ 編輯行程';
+
+  const it = mode === 'edit' ? item : { title: '', desc: '', category: { type: 'other', emoji: '📌', label: '行程' }};
+  f.querySelector('#it-fld-title').value = it.title || '';
+  f.querySelector('#it-fld-desc').value = it.desc || '';
+  f.querySelector('#it-fld-place').value = it.place || '';
+  f.querySelector('#it-fld-time-start').value = it.time_start || '';
+  f.querySelector('#it-fld-time-end').value = it.time_end || '';
+  f.querySelector('#it-fld-category').value = it.category?.type || 'other';
+  f.querySelector('#it-fld-image').value = (it.images && it.images[0]?.thumb) || '';
+  f.querySelector('#it-fld-links').value = (it.links || []).join('\n');
+  status.textContent = '';
+  title.textContent = it.title ? `（編輯：${it.title}）` : '';
+
+  modal.querySelector('#it-save').onclick = async () => {
+    const payload = {
+      title: f.querySelector('#it-fld-title').value.trim(),
+      desc: f.querySelector('#it-fld-desc').value.trim(),
+      place: f.querySelector('#it-fld-place').value.trim(),
+      time_start: f.querySelector('#it-fld-time-start').value.trim(),
+      time_end: f.querySelector('#it-fld-time-end').value.trim(),
+      category: makeCategory(f.querySelector('#it-fld-category').value),
+      links: f.querySelector('#it-fld-links').value.split('\n').map(s => s.trim()).filter(Boolean),
+    };
+    const img = f.querySelector('#it-fld-image').value.trim();
+    if (img) payload.images = [{ thumb: img, full: img, name: '' }];
+
+    if (!payload.title) {
+      status.textContent = '請輸入標題';
+      return;
+    }
+    status.textContent = '儲存中…';
+    try {
+      if (mode === 'add') {
+        await store.createCustomItem(activeBoardId, day.date, payload);
+      } else {
+        await store.updateItem(activeBoardId, item.id, payload);
+      }
+      modal.classList.add('hidden');
+      await loadActiveBoard();
+    } catch (e) {
+      status.textContent = '錯誤：' + e.message;
+    }
+  };
+
+  modal.querySelector('#it-close').onclick = () => modal.classList.add('hidden');
+}
+
+document.getElementById('item-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'item-modal') e.target.classList.add('hidden');
+});
+
+const CATEGORY_DEFS = {
+  food:    { emoji: '🍽️', label: '餐廳' },
+  hotel:   { emoji: '🏨', label: '住宿' },
+  transit: { emoji: '🚆', label: '交通' },
+  shop:    { emoji: '🛍️', label: '購物' },
+  ticket:  { emoji: '🎫', label: '票券' },
+  sight:   { emoji: '🏛️', label: '景點' },
+  other:   { emoji: '📌', label: '行程' },
+};
+function makeCategory(type) {
+  return { type, ...(CATEGORY_DEFS[type] || CATEGORY_DEFS.other) };
+}
+
 // ---------- Helpers ----------
 async function copyToClipboard(text) {
   try {
@@ -357,12 +480,6 @@ function escapeAttr(s) { return escapeHtml(s); }
 // ---------- Init ----------
 (async function init() {
   if (!await ensureLoggedIn()) return;
-  try {
-    const cfg = await store.fetchConfig();
-    setMapsKey(cfg.google_maps_key || '');
-  } catch (e) {
-    console.warn('fetchConfig failed:', e.message);
-  }
   activeBoardId = await store.getActiveId();
   await refreshSidebar();
   await loadActiveBoard();

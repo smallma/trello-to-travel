@@ -90,6 +90,32 @@ export async function clearBoardCache(boardId) {
   await api(`/api/boards/${encodeURIComponent(boardId)}/cache`, { method: 'DELETE' });
 }
 
+// ---------- Custom items + overrides ----------
+export async function fetchExtras(boardId) {
+  return await api(`/api/boards/${encodeURIComponent(boardId)}/extras`);
+}
+export async function createCustomItem(boardId, dayDate, payload) {
+  return await api(`/api/boards/${encodeURIComponent(boardId)}/days/${encodeURIComponent(dayDate)}/items`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+export async function updateItem(boardId, itemId, payload) {
+  return await api(`/api/boards/${encodeURIComponent(boardId)}/items/${encodeURIComponent(itemId)}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+export async function deleteItem(boardId, itemId) {
+  await api(`/api/boards/${encodeURIComponent(boardId)}/items/${encodeURIComponent(itemId)}`, { method: 'DELETE' });
+}
+
+// ---------- Geocode ----------
+export async function geocode(q) {
+  const path = `/api/geocode?q=${encodeURIComponent(q)}`;
+  return await api(path);
+}
+
 // ---------- boards ----------
 export async function listBoards() {
   const { boards } = await api('/api/boards');

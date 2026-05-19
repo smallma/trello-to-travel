@@ -171,27 +171,71 @@ body.editing-route .tl-card-check { display: block; }
 body.editing-route .tl-card { transition: outline-color .15s; }
 body.editing-route .tl-card:hover { outline: 1px dashed #d4d2c8; outline-offset: 2px; }
 
-/* Hide button — hover only */
-.tl-card-hide {
+/* Action buttons — hover only */
+.tl-card-actions {
   position: absolute;
   top: 6px;
   right: 6px;
-  width: 22px;
-  height: 22px;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity .15s;
+  z-index: 3;
+}
+.tl-card:hover .tl-card-actions { opacity: 1; }
+.tl-card-action {
+  width: 26px; height: 26px;
   border-radius: 50%;
   border: none;
-  background: rgba(0,0,0,0);
-  color: #cbd5e1;
+  background: rgba(255,255,255,.9);
+  color: #6b7280;
   cursor: pointer;
-  font-size: 16px;
+  font-size: 13px;
   line-height: 20px;
-  opacity: 0;
-  transition: opacity .15s, background .15s, color .15s;
-  z-index: 3;
   padding: 0;
+  transition: background .15s, color .15s;
 }
-.tl-card:hover .tl-card-hide { opacity: 1; }
-.tl-card-hide:hover { background: #fee2e2; color: #dc2626; }
+.tl-card-action:hover { background: #f3f4f6; color: #1f2937; }
+.tl-card-action.tl-card-delete:hover { background: #fee2e2; color: #dc2626; }
+
+/* + 新增 bar */
+.day-add-bar { padding: 6px 16px 6px 60px; }
+.day-add-btn {
+  background: #fff;
+  border: 1px dashed var(--brand);
+  color: var(--brand);
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background .15s, color .15s;
+}
+.day-add-btn:hover { background: var(--brand); color: #fff; }
+
+/* Leaflet markers */
+.leaflet-map { border-radius: 6px; overflow: hidden; }
+.tl-marker { background: none; border: none; }
+.tl-marker-pin {
+  width: 28px; height: 36px;
+  position: relative;
+  background: var(--brand);
+  border-radius: 14px 14px 14px 0;
+  transform: rotate(-45deg);
+  box-shadow: 0 2px 6px rgba(0,0,0,.3);
+}
+.tl-marker-pin span {
+  position: absolute;
+  inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff;
+  font-weight: 700;
+  font-size: 12px;
+  transform: rotate(45deg);
+}
+
+/* Modal row */
+.modal-row { display: flex; gap: 12px; }
+.muted { color: #9ca3af; font-size: 12px; }
 
 /* Toolbar edit-route button active state */
 #edit-route-toggle.active { background: var(--brand); color: #fff; }
