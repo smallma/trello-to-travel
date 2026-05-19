@@ -534,10 +534,10 @@ async function openItemEditor({ mode, item, day }) {
     try {
       const r = await store.createDraft(activeBoardId, day.date);
       _currentDraftId = r.id;
-      workingItem = { id: r.id, title: '', desc: '', category: { type: 'other', emoji: '📌', label: '行程' }};
+      workingItem = { id: r.id, title: '', desc: '', category: { type: 'sight', emoji: '🏛️', label: '景點' }};
     } catch (e) {
       _currentDraftId = null;
-      workingItem = { title: '', desc: '', category: { type: 'other', emoji: '📌', label: '行程' }};
+      workingItem = { title: '', desc: '', category: { type: 'sight', emoji: '🏛️', label: '景點' }};
       status.textContent = '⚠ 建立草稿失敗，附件功能停用：' + e.message;
     } finally {
       hideProgress();
@@ -552,7 +552,10 @@ async function openItemEditor({ mode, item, day }) {
   f.querySelector('#it-fld-place').value = it.place || '';
   f.querySelector('#it-fld-time-start').value = it.time_start || '';
   f.querySelector('#it-fld-time-end').value = it.time_end || '';
-  f.querySelector('#it-fld-category').value = it.category?.type || 'other';
+  // Show the saved category in the dropdown; if it's the legacy 'other'
+  // (which we removed from the UI) or anything unknown, fall back to 'sight'.
+  const KNOWN_TYPES = new Set(['sight','food','hotel','transit','shop','ticket']);
+  f.querySelector('#it-fld-category').value = KNOWN_TYPES.has(it.category?.type) ? it.category.type : 'sight';
   f.querySelector('#it-fld-image').value = '';   // not used anymore; we upload via dropzone
   f.querySelector('#it-fld-links').value = (it.links || []).join('\n');
   status.textContent = '';
