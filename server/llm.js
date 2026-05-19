@@ -3,7 +3,45 @@
 
 const ENDPOINT = process.env.MINIMAX_ENDPOINT || 'https://api.minimax.io/v1/chat/completions';
 const MODEL = process.env.MINIMAX_MODEL || 'MiniMax-M2.7';
-const TIMEOUT_MS = parseInt(process.env.LLM_TIMEOUT_MS || '25000', 10);
+const TIMEOUT_MS = parseInt(process.env.LLM_TIMEOUT_MS || '60000', 10);
+const TAVILY_ENDPOINT = 'https://api.tavily.com/search';
+
+/**
+ * Tavily web search. Returns short snippets to inject into LLM prompts.
+ * Returns '' on any failure so caller can fall back gracefully.
+ */
+async function tavilySearch(query, { max_results = 5 } = {}) {
+  const apiKey = process.env.TAVILY_API_KEY;
+  if (!apiKey) return '';
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 15000);
+    const res = await fetch(TAVILY_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: apiKey,
+        query,
+        search_depth: 'basic',
+        max_results,
+        include_answer: true,
+      }),
+      signal: ctrl.signal,
+    });
+    clearTimeout(t);
+    if (!res.ok) return '';
+    const data = await res.json();
+    const lines = [];
+    if (data.answer) lines.push(`【摘要】${data.answer}`);
+    for (const r of (data.results || [])) {
+      lines.push(`- ${r.title}: ${(r.content || '').slice(0, 200)}`);
+    }
+    return lines.join('\n');
+  } catch (e) {
+    console.warn(`[tavily] search failed for "${query}": ${e.message}`);
+    return '';
+  }
+}
 
 const SYSTEM_PROMPT = `你是一位地圖路線助理。我會給你一份旅遊行程的卡片列表，請你回傳「真實存在於地圖上、可以被 Google Maps 找到的地點」。
 
@@ -121,9 +159,15 @@ const GUIDE_PROMPTS = {
  * @param {string} preference - free-form board-level preference, may be empty
  * @returns {Promise<string>} markdown content
  */
-export async function generateGuide(item, city, preference) {
+export async function generateGuide(item, city, preference, { use_search = false } = {}) {
   const apiKey = process.env.MINIMAX_API_KEY;
   if (!apiKey) throw new Error('MINIMAX_API_KEY not set');
+
+  let searchSnippets = '';
+  if (use_search) {
+    const q = `${item.title} ${city || ''} 旅遊 開放時間 票價 注意事項`.trim();
+    searchSnippets = await tavilySearch(q, { max_results: 5 });
+  }
 
   const type = item?.category?.type || 'other';
   const tmpl = GUIDE_PROMPTS[type] || GUIDE_PROMPTS.other;
@@ -134,6 +178,7 @@ export async function generateGuide(item, city, preference) {
   if (item.place) extra.push(`地點：${item.place}`);
   if (item.desc) extra.push(`卡片上的備註：${truncate(item.desc, 400)}`);
   if (preference) extra.push(`旅人偏好：${preference}`);
+  if (searchSnippets) extra.push(`\n【網路搜尋結果（請以此為主、優先使用最新資訊）】\n${searchSnippets}`);
 
   const system = `${base}
 
@@ -261,4 +306,78 @@ function cleanGuideText(raw) {
 function truncate(s, n) {
   if (!s) return '';
   return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
+// ============================================================================
+// Q&A (single-shot)
+// ============================================================================
+
+export async function generateAnswer({ question, item, city, day_summary, board_name, preference, use_search }) {
+  const apiKey = process.env.MINIMAX_API_KEY;
+  if (!apiKey) throw new Error('MINIMAX_API_KEY not set');
+
+  let searchSnippets = '';
+  if (use_search) {
+    const q = `${item?.title || ''} ${city || ''} ${question}`.trim();
+    searchSnippets = await tavilySearch(q, { max_results: 5 });
+  }
+
+  const system = `你是熟悉「${board_name || '此趟旅程'}」的私人導遊。回答下面這個關於「${item?.title || '此景點'}」的問題。
+
+【嚴格輸出規則】
+- 直接回答，不要思考過程、不要前言、不要客套
+- 不要 <think> 標籤、不要 markdown code fence
+- 使用繁體中文，總長 80-180 字
+- 條列時用「-」開頭
+- 不確定的事就誠實說「資訊有限，建議查當地最新評論」
+- 若提供網路搜尋結果，優先以那些為準
+- 答案要切合「此景點 + 當天行程脈絡 + 旅人偏好」，不要離題`;
+
+  const ctx = [];
+  if (board_name) ctx.push(`整趟行程：${board_name}`);
+  if (preference) ctx.push(`旅人偏好：${preference}`);
+  if (city) ctx.push(`城市：${city}`);
+  if (item?.place) ctx.push(`此景點地址：${item.place}`);
+  if (item?.desc) ctx.push(`卡片備註：${truncate(item.desc, 300)}`);
+  if (day_summary) ctx.push(`【當天行程概覽】\n${day_summary}`);
+  if (searchSnippets) ctx.push(`\n【網路搜尋結果（最新）】\n${searchSnippets}`);
+  ctx.push(`\n【使用者問題】\n${question}`);
+
+  const body = {
+    model: MODEL,
+    max_tokens: 700,
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: ctx.join('\n') },
+    ],
+  };
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(ENDPOINT, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+  } finally { clearTimeout(timer); }
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`MiniMax ${res.status}: ${text.slice(0, 300)}`);
+  }
+  const data = await res.json();
+  const text = data?.choices?.[0]?.message?.content || '';
+  return cleanQaText(text);
+}
+
+function cleanQaText(raw) {
+  if (!raw) return '';
+  let text = raw;
+  const close = text.lastIndexOf('</think>');
+  if (close >= 0) text = text.slice(close + '</think>'.length);
+  text = text.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<think>[\s\S]*$/i, '').trim();
+  text = text.replace(/^```[a-z]*\s*/i, '').replace(/```\s*$/i, '').trim();
+  return text;
 }

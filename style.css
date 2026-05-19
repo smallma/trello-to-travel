@@ -320,6 +320,64 @@ body.editing-route .tl-card:hover { outline: 1px dashed #d4d2c8; outline-offset:
   white-space: nowrap;
 }
 
+/* Guide actions + warning */
+.tl-guide-actions { display: inline-flex; gap: 4px; }
+.tl-guide-search { background: none; border: 1px solid #fed7aa; color: #9a3412; padding: 1px 8px; border-radius: 4px; font-size: 11.5px; cursor: pointer; }
+.tl-guide-search:hover:not(:disabled) { background: #fed7aa; }
+.tl-guide-search:disabled { opacity: .4; cursor: not-allowed; }
+.tl-guide-warning { margin-top: 8px; font-size: 11.5px; color: #b45309; background: #fef9c3; padding: 4px 10px; border-radius: 4px; }
+
+/* Q&A */
+.tl-qa { background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px; padding: 10px 14px; margin-bottom: 10px; }
+.tl-qa-header { font-size: 13px; color: #075985; margin-bottom: 8px; }
+.tl-qa-form { display: flex; gap: 6px; flex-wrap: wrap; }
+.tl-qa-input { flex: 1; min-width: 200px; padding: 5px 10px; border: 1px solid #bae6fd; border-radius: 5px; font-size: 13px; }
+.tl-qa-input:focus { outline: none; border-color: #0284c7; }
+.tl-qa-ask { padding: 5px 12px; background: #0284c7; color: #fff; border: none; border-radius: 5px; font-size: 12.5px; cursor: pointer; }
+.tl-qa-ask:hover:not(:disabled) { background: #0369a1; }
+.tl-qa-ask-search { background: #c8633f; }
+.tl-qa-ask-search:hover:not(:disabled) { background: #9a3412; }
+.tl-qa-ask:disabled { opacity: .4; cursor: not-allowed; }
+.tl-qa-list { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.tl-qa-row { background: #fff; border-radius: 6px; padding: 8px 32px 8px 10px; position: relative; font-size: 13px; }
+.tl-qa-q { color: #075985; margin-bottom: 4px; }
+.tl-qa-source { font-size: 10.5px; color: #9ca3af; background: #f3f4f6; padding: 0 6px; border-radius: 6px; margin-left: 4px; }
+.tl-qa-a { color: #374151; line-height: 1.65; }
+.tl-qa-a p { margin: 3px 0; }
+.tl-qa-a ul { padding-left: 18px; margin: 3px 0; }
+.tl-qa-del { position: absolute; top: 6px; right: 8px; background: none; border: none; color: #9ca3af; cursor: pointer; font-size: 14px; padding: 2px 6px; border-radius: 3px; }
+.tl-qa-del:hover { background: #fee2e2; color: #dc2626; }
+
+/* File attachments in card */
+.tl-files { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); }
+.tl-files-h { font-size: 12.5px; color: var(--muted); margin-bottom: 4px; }
+.tl-file-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; }
+.tl-file-name { color: var(--brand); text-decoration: none; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl-file-name:hover { color: var(--accent); text-decoration: underline; }
+.tl-file-size { color: var(--muted); font-size: 11.5px; }
+.tl-file-del { background: none; border: none; color: #9ca3af; cursor: pointer; font-size: 14px; padding: 0 6px; border-radius: 3px; }
+.tl-file-del:hover { color: #dc2626; background: #fee2e2; }
+
+/* Dropzone in modal */
+.dropzone { border: 2px dashed var(--line); border-radius: 8px; padding: 18px; text-align: center; color: #6b7280; font-size: 13px; transition: background .15s, border-color .15s; }
+.dropzone.dragover { background: #ecfdf5; border-color: var(--brand); color: var(--brand); }
+.dropzone.uploading { background: #fff7ed; border-color: var(--accent); }
+.dropzone .dz-pick { color: var(--brand); cursor: pointer; text-decoration: underline; }
+.dz-status { margin-top: 4px; font-size: 12px; color: var(--muted); }
+
+.attach-list { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; max-height: 200px; overflow-y: auto; }
+.attach-row { display: flex; align-items: center; gap: 8px; padding: 4px 8px; background: #f9fafb; border-radius: 5px; font-size: 13px; }
+.attach-thumb { width: 36px; height: 36px; object-fit: cover; border-radius: 4px; }
+.attach-icon { font-size: 22px; width: 36px; text-align: center; }
+.attach-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-size { color: var(--muted); font-size: 11.5px; }
+.attach-del { background: none; border: none; color: #9ca3af; cursor: pointer; font-size: 14px; padding: 0 6px; border-radius: 3px; }
+.attach-del:hover { color: #dc2626; background: #fee2e2; }
+
+/* Toolbar export/import */
+.upload-import { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border: 1px solid var(--brand); color: var(--brand); border-radius: 5px; font-size: 13px; cursor: pointer; background: #fff; transition: background .15s, color .15s; }
+.upload-import:hover { background: var(--brand); color: #fff; }
+
 /* Toolbar edit-route button active state */
 #edit-route-toggle.active { background: var(--brand); color: #fff; }
 

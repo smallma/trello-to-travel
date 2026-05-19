@@ -128,6 +128,69 @@ export async function saveItemOrder(boardId, dayDate, itemIds) {
   });
 }
 
+// ---------- Attachments ----------
+export async function fetchAttachments(boardId) {
+  const { attachments } = await api(`/api/boards/${encodeURIComponent(boardId)}/attachments`);
+  return attachments || [];
+}
+export async function uploadAttachments(boardId, itemId, files) {
+  const fd = new FormData();
+  for (const f of files) fd.append('file', f);
+  const res = await fetch(`/api/boards/${encodeURIComponent(boardId)}/items/${encodeURIComponent(itemId)}/attachments`, {
+    method: 'POST',
+    headers: { 'X-API-Password': getPassword() },
+    body: fd,
+  });
+  if (!res.ok) {
+    const j = await res.json().catch(() => ({}));
+    throw new Error(j.error || `upload ${res.status}`);
+  }
+  return await res.json();
+}
+export async function deleteAttachment(attachmentId) {
+  await api(`/api/attachments/${encodeURIComponent(attachmentId)}`, { method: 'DELETE' });
+}
+// URL helpers — embed password in query so <img>/<a download> work without headers
+export function attachmentUrl(attachmentId, variant) {
+  return `/api/attachments/${encodeURIComponent(attachmentId)}/${variant}?pw=${encodeURIComponent(getPassword())}`;
+}
+
+// ---------- Q&A ----------
+export async function fetchQa(boardId, itemId) {
+  const { qa } = await api(`/api/boards/${encodeURIComponent(boardId)}/items/${encodeURIComponent(itemId)}/qa`);
+  return qa || [];
+}
+export async function askQa(boardId, itemId, payload) {
+  return await api(`/api/boards/${encodeURIComponent(boardId)}/items/${encodeURIComponent(itemId)}/qa`, {
+    method: 'POST', body: JSON.stringify(payload),
+  });
+}
+export async function deleteQa(qaId) {
+  await api(`/api/qa/${encodeURIComponent(qaId)}`, { method: 'DELETE' });
+}
+export async function clearQaForItem(boardId, itemId) {
+  await api(`/api/boards/${encodeURIComponent(boardId)}/items/${encodeURIComponent(itemId)}/qa`, { method: 'DELETE' });
+}
+
+// ---------- Backup ----------
+export function exportBoardUrl(boardId) {
+  return `/api/boards/${encodeURIComponent(boardId)}/export?pw=${encodeURIComponent(getPassword())}`;
+}
+export async function importBoard(file) {
+  const fd = new FormData();
+  fd.append('file', file);
+  const res = await fetch('/api/boards/import', {
+    method: 'POST',
+    headers: { 'X-API-Password': getPassword() },
+    body: fd,
+  });
+  if (!res.ok) {
+    const j = await res.json().catch(() => ({}));
+    throw new Error(j.error || `import ${res.status}`);
+  }
+  return await res.json();
+}
+
 // ---------- boards ----------
 export async function listBoards() {
   const { boards } = await api('/api/boards');

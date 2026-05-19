@@ -15,9 +15,11 @@ let currentData = null;
 let activeBoardId = null;
 let hiddenIds = new Set();
 let editingRoute = false;
-let customItems = [];      // [{id, day_date, title, ...}]
-let overrides = {};        // {trelloItemId: {title, desc, ...}}
+let customItems = [];
+let overrides = {};
 let isCustomId = new Set();
+let attachmentsByItem = new Map();  // itemId -> [attachment, ...]
+let serverFeatures = { llm: false, search: false, attachments: false, backup: false };
 
 setRouteHandlers({
   getRouteOff: () => activeBoardId ? store.getRouteOff(activeBoardId) : {},
@@ -73,6 +75,23 @@ setRouteHandlers({
       showToast('天數順序已儲存');
     } catch (e) { showError('儲存天數順序失敗：' + e.message); }
   },
+  // Attachments
+  getAttachmentsForItem: (itemId) => attachmentsByItem.get(itemId) || [],
+  getAttachmentUrl: (id, variant) => store.attachmentUrl(id, variant),
+  deleteAttachment: async (id) => {
+    await store.deleteAttachment(id);
+    // remove from cache
+    for (const arr of attachmentsByItem.values()) {
+      const i = arr.findIndex(a => a.id === id);
+      if (i >= 0) arr.splice(i, 1);
+    }
+    await loadActiveBoard();
+  },
+  // Q&A
+  fetchQa: (itemId) => store.fetchQa(activeBoardId, itemId),
+  askQa: (itemId, payload) => store.askQa(activeBoardId, itemId, payload),
+  deleteQa: (id) => store.deleteQa(id),
+  getFeatures: () => serverFeatures,
 });
 
 // ---------- Password gate ----------
@@ -203,6 +222,14 @@ async function loadActiveBoard() {
     const data = parseTrello(board.raw);
     await store.loadRouteOff(activeBoardId);
     try { hiddenIds = await store.fetchHidden(activeBoardId); } catch { hiddenIds = new Set(); }
+    try {
+      const atts = await store.fetchAttachments(activeBoardId);
+      attachmentsByItem = new Map();
+      for (const a of atts) {
+        if (!attachmentsByItem.has(a.item_id)) attachmentsByItem.set(a.item_id, []);
+        attachmentsByItem.get(a.item_id).push(a);
+      }
+    } catch { attachmentsByItem = new Map(); }
     let itemOrder = {};
     let dayOrder = {};
     try {
@@ -218,6 +245,8 @@ async function loadActiveBoard() {
 
     // Merge + apply user-defined order (overrides Trello's pos)
     const merged = mergeBoardData(data, customItems, overrides, itemOrder, dayOrder);
+    // Inject uploaded image attachments into item.images so they show as thumbs
+    injectAttachmentImages(merged);
     currentData = merged;
     hideBanner();
     if (data.warnings.length) showWarning(data.warnings.join('；'));
@@ -226,6 +255,23 @@ async function loadActiveBoard() {
   } catch (err) {
     showError(err.message || '解析失敗');
   }
+}
+
+function injectAttachmentImages(merged) {
+  const enrich = (item) => {
+    const atts = attachmentsByItem.get(item.id);
+    if (!atts || atts.length === 0) return item;
+    const imgAtts = atts.filter(a => a.kind === 'image');
+    if (imgAtts.length === 0) return item;
+    const uploaded = imgAtts.map(a => ({
+      thumb: store.attachmentUrl(a.id, 'thumb'),
+      full: store.attachmentUrl(a.id, 'medium'),
+      name: a.original_name,
+    }));
+    return { ...item, images: [...uploaded, ...(item.images || [])] };
+  };
+  for (const day of merged.days) day.items = day.items.map(enrich);
+  for (const k of Object.keys(merged.extras)) merged.extras[k] = merged.extras[k].map(enrich);
 }
 
 function mergeBoardData(data, customs, overrides, itemOrder = {}, dayOrder = {}) {
@@ -455,6 +501,10 @@ function openItemEditor({ mode, item, day }) {
   const title = modal.querySelector('#it-title');
   const status = modal.querySelector('#it-status');
   const h = modal.querySelector('#it-h');
+  const dz = modal.querySelector('#it-dropzone');
+  const dzStatus = modal.querySelector('#it-dz-status');
+  const dzInput = dz.querySelector('input[type=file]');
+  const attList = modal.querySelector('#it-attachments');
 
   h.textContent = mode === 'add' ? `+ 新增行程（${day?.list_name || ''}）` : '✏️ 編輯行程';
 
@@ -465,10 +515,88 @@ function openItemEditor({ mode, item, day }) {
   f.querySelector('#it-fld-time-start').value = it.time_start || '';
   f.querySelector('#it-fld-time-end').value = it.time_end || '';
   f.querySelector('#it-fld-category').value = it.category?.type || 'other';
-  f.querySelector('#it-fld-image').value = (it.images && it.images[0]?.thumb) || '';
+  f.querySelector('#it-fld-image').value = '';   // not used anymore; we upload via dropzone
   f.querySelector('#it-fld-links').value = (it.links || []).join('\n');
   status.textContent = '';
   title.textContent = it.title ? `（編輯：${it.title}）` : '';
+
+  // Attachments: only available for existing items (need an id)
+  const itemId = mode === 'edit' ? item.id : null;
+  attList.innerHTML = '';
+  if (itemId) {
+    const refreshAttList = () => {
+      attList.innerHTML = '';
+      const atts = attachmentsByItem.get(itemId) || [];
+      if (atts.length === 0) {
+        attList.innerHTML = '<em class="muted">尚無附件</em>';
+        return;
+      }
+      for (const a of atts) {
+        const row = document.createElement('div');
+        row.className = 'attach-row';
+        if (a.kind === 'image') {
+          row.innerHTML = `<img class="attach-thumb" src="${escapeAttr(store.attachmentUrl(a.id, 'thumb'))}" alt="">`;
+        } else {
+          row.innerHTML = `<span class="attach-icon">📄</span>`;
+        }
+        row.insertAdjacentHTML('beforeend', `<span class="attach-name">${escapeHtml(a.original_name)}</span><span class="attach-size">${fmtBytes(a.size)}</span>`);
+        const del = document.createElement('button');
+        del.className = 'attach-del'; del.textContent = '×'; del.title = '刪除';
+        del.addEventListener('click', async (e) => {
+          e.preventDefault();
+          if (!confirm(`刪除「${a.original_name}」？`)) return;
+          try {
+            await store.deleteAttachment(a.id);
+            const arr = attachmentsByItem.get(itemId);
+            if (arr) {
+              const i = arr.findIndex(x => x.id === a.id);
+              if (i >= 0) arr.splice(i, 1);
+            }
+            refreshAttList();
+          } catch (e2) { alert(e2.message); }
+        });
+        row.appendChild(del);
+        attList.appendChild(row);
+      }
+    };
+    refreshAttList();
+
+    const doUpload = async (files) => {
+      if (!files || files.length === 0) return;
+      dz.classList.add('uploading');
+      dzStatus.textContent = `上傳中… (${files.length} 個檔案)`;
+      try {
+        await store.uploadAttachments(activeBoardId, itemId, files);
+        // re-fetch to get full DTOs
+        const atts = await store.fetchAttachments(activeBoardId);
+        attachmentsByItem = new Map();
+        for (const a of atts) {
+          if (!attachmentsByItem.has(a.item_id)) attachmentsByItem.set(a.item_id, []);
+          attachmentsByItem.get(a.item_id).push(a);
+        }
+        refreshAttList();
+        dzStatus.textContent = '✓ 上傳完成';
+      } catch (e) {
+        dzStatus.textContent = '⚠ ' + e.message;
+      } finally {
+        dz.classList.remove('uploading');
+      }
+    };
+
+    dzInput.onchange = () => { doUpload(dzInput.files); dzInput.value = ''; };
+    dz.ondragover = (e) => { e.preventDefault(); dz.classList.add('dragover'); };
+    dz.ondragleave = () => dz.classList.remove('dragover');
+    dz.ondrop = (e) => {
+      e.preventDefault();
+      dz.classList.remove('dragover');
+      doUpload(e.dataTransfer.files);
+    };
+  } else {
+    attList.innerHTML = '<em class="muted">先儲存卡片後才能上傳附件</em>';
+    dz.style.display = 'none';
+  }
+  // Restore dropzone visibility when re-opening for edit
+  if (itemId) dz.style.display = '';
 
   modal.querySelector('#it-save').onclick = async () => {
     const payload = {
@@ -557,10 +685,48 @@ function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 function escapeAttr(s) { return escapeHtml(s); }
+function fmtBytes(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1024 * 1024) return (b / 1024).toFixed(0) + ' KB';
+  return (b / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+// Export / import buttons
+const exportBtn = document.getElementById('export-board');
+if (exportBtn) {
+  exportBtn.addEventListener('click', () => {
+    if (!activeBoardId) return showToast('沒有開啟的行程');
+    window.location.href = store.exportBoardUrl(activeBoardId);
+  });
+}
+const importInput = document.getElementById('import-file');
+if (importInput) {
+  importInput.addEventListener('change', async () => {
+    const file = importInput.files[0];
+    if (!file) return;
+    showToast('匯入中…');
+    try {
+      const res = await store.importBoard(file);
+      showToast('已匯入：' + res.name);
+      activeBoardId = res.id;
+      await store.setActiveId(res.id);
+      await refreshSidebar();
+      await loadActiveBoard();
+    } catch (e) {
+      showError('匯入失敗：' + e.message);
+    } finally {
+      importInput.value = '';
+    }
+  });
+}
 
 // ---------- Init ----------
 (async function init() {
   if (!await ensureLoggedIn()) return;
+  try {
+    const cfg = await store.fetchConfig();
+    serverFeatures = cfg.features || serverFeatures;
+  } catch {}
   activeBoardId = await store.getActiveId();
   await refreshSidebar();
   await loadActiveBoard();

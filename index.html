@@ -53,6 +53,11 @@
             包含補充資訊
           </label>
           <button id="copy-json" class="primary">複製為 JSON</button>
+          <button id="export-board" title="匯出這份行程為 ZIP">📦 匯出</button>
+          <label class="upload-import" title="匯入 ZIP 行程（自動換新 ID）">
+            ⬇ 匯入
+            <input id="import-file" type="file" accept=".zip" hidden>
+          </label>
         </div>
       </section>
 
@@ -113,6 +118,13 @@
 
           <label class="modal-label">相關連結 <span class="modal-hint">一行一個</span></label>
           <textarea id="it-fld-links" class="modal-input" rows="2" placeholder="https://..."></textarea>
+
+          <label class="modal-label">附件 <span class="modal-hint">圖片自動產縮圖；單檔 10MB；圖片 20 張、檔案 30 個上限</span></label>
+          <div id="it-dropzone" class="dropzone">
+            <p>把檔案拖進來，或 <label class="dz-pick">點此選擇<input type="file" multiple hidden></label></p>
+            <div id="it-dz-status" class="dz-status"></div>
+          </div>
+          <div id="it-attachments" class="attach-list"></div>
 
           <div class="modal-actions">
             <span id="it-status" class="modal-status"></span>

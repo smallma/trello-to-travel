@@ -3,22 +3,34 @@ import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import Database from 'better-sqlite3';
-import { existsSync, mkdirSync } from 'fs';
-import { dirname, join } from 'path';
+import { existsSync, mkdirSync, rmSync, createReadStream, statfsSync, writeFileSync } from 'fs';
+import { writeFile, unlink } from 'fs/promises';
+import { dirname, join, extname } from 'path';
 import { fileURLToPath } from 'url';
-import { createHash } from 'crypto';
-import { extractPlaces, generateGuide } from './llm.js';
+import { createHash, randomBytes } from 'crypto';
+import sharp from 'sharp';
+import AdmZip from 'adm-zip';
+import { readFile } from 'fs/promises';
+import { extractPlaces, generateGuide, generateAnswer } from './llm.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || join(__dirname, 'data');
+const UPLOAD_DIR = process.env.UPLOAD_DIR || join(DATA_DIR, 'uploads');
 const PORT = parseInt(process.env.PORT || '5566', 10);
 const PASSWORD = process.env.API_PASSWORD;
 const STATIC_DIR = process.env.STATIC_DIR || join(__dirname, '..');
+
+const MAX_FILE_BYTES = 10 * 1024 * 1024;      // 10 MB per file
+const MAX_IMAGES_PER_ITEM = 20;
+const MAX_FILES_PER_ITEM = 30;                 // images + other
+const MAX_UPLOAD_TOTAL_BYTES = 5 * 1024 * 1024 * 1024;  // 5 GB total
+const MIN_DISK_FREE_BYTES = 500 * 1024 * 1024; // require 500 MB free
 
 if (!PASSWORD) {
   console.error('FATAL: API_PASSWORD env var is required.');
   process.exit(1);
 }
+if (!existsSync(UPLOAD_DIR)) mkdirSync(UPLOAD_DIR, { recursive: true });
 
 if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
 
@@ -109,6 +121,31 @@ db.exec(`
     pos       REAL NOT NULL,
     PRIMARY KEY (board_id, day_date)
   );
+  CREATE TABLE IF NOT EXISTS attachments (
+    id            TEXT PRIMARY KEY,
+    board_id      TEXT NOT NULL,
+    item_id       TEXT NOT NULL,
+    kind          TEXT NOT NULL,
+    original_name TEXT NOT NULL,
+    mime          TEXT NOT NULL,
+    size          INTEGER NOT NULL,
+    rel_path      TEXT NOT NULL,
+    thumb_path    TEXT,
+    medium_path   TEXT,
+    pos           REAL NOT NULL,
+    created_at    INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_att_item ON attachments(board_id, item_id);
+  CREATE TABLE IF NOT EXISTS qa (
+    id          TEXT PRIMARY KEY,
+    board_id    TEXT NOT NULL,
+    item_id     TEXT NOT NULL,
+    question    TEXT NOT NULL,
+    answer      TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_qa_item ON qa(board_id, item_id, created_at);
 `);
 
 const stmt = {
@@ -220,6 +257,29 @@ const stmt = {
     ON CONFLICT(board_id, day_date) DO UPDATE SET pos = excluded.pos
   `),
   clearDayOrderForBoard: db.prepare('DELETE FROM day_order WHERE board_id = ?'),
+
+  // Attachments
+  listAttachmentsForBoard: db.prepare('SELECT * FROM attachments WHERE board_id = ? ORDER BY item_id, pos'),
+  listAttachmentsForItem: db.prepare('SELECT * FROM attachments WHERE board_id = ? AND item_id = ? ORDER BY pos'),
+  getAttachment: db.prepare('SELECT * FROM attachments WHERE id = ?'),
+  insertAttachment: db.prepare(`
+    INSERT INTO attachments (id, board_id, item_id, kind, original_name, mime, size, rel_path, thumb_path, medium_path, pos, created_at)
+    VALUES (@id, @board_id, @item_id, @kind, @original_name, @mime, @size, @rel_path, @thumb_path, @medium_path, @pos, @created_at)
+  `),
+  deleteAttachment: db.prepare('DELETE FROM attachments WHERE id = ?'),
+  clearAttachmentsForBoard: db.prepare('DELETE FROM attachments WHERE board_id = ?'),
+  clearAttachmentsForItem: db.prepare('DELETE FROM attachments WHERE board_id = ? AND item_id = ?'),
+  countAttachmentsForItem: db.prepare('SELECT COUNT(*) AS c, COUNT(CASE WHEN kind=\'image\' THEN 1 END) AS img FROM attachments WHERE board_id = ? AND item_id = ?'),
+  totalUploadSize: db.prepare('SELECT COALESCE(SUM(size),0) AS s FROM attachments'),
+  maxAttachmentPos: db.prepare('SELECT MAX(pos) AS m FROM attachments WHERE board_id = ? AND item_id = ?'),
+
+  // Q&A
+  listQa: db.prepare('SELECT id, item_id, question, answer, source, created_at FROM qa WHERE board_id = ? AND item_id = ? ORDER BY created_at'),
+  listQaForBoard: db.prepare('SELECT id, item_id, question, answer, source, created_at FROM qa WHERE board_id = ?'),
+  insertQa: db.prepare('INSERT INTO qa (id, board_id, item_id, question, answer, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'),
+  deleteQa: db.prepare('DELETE FROM qa WHERE id = ?'),
+  clearQaForItem: db.prepare('DELETE FROM qa WHERE board_id = ? AND item_id = ?'),
+  clearQaForBoard: db.prepare('DELETE FROM qa WHERE board_id = ?'),
 };
 
 // --- App ---
@@ -227,9 +287,11 @@ const app = new Hono();
 
 // Auth middleware for /api/*
 app.use('/api/*', async (c, next) => {
-  // Always allow auth check endpoint without a password (used by frontend probe)
   if (c.req.path === '/api/ping') return next();
-  const pw = c.req.header('X-API-Password') || '';
+  // Allow attachment streams via query token (for <img src>, downloads)
+  const fromHeader = c.req.header('X-API-Password') || '';
+  const fromQuery = c.req.query('pw') || '';
+  const pw = fromHeader || fromQuery;
   if (pw !== PASSWORD) return c.json({ error: 'unauthorized' }, 401);
   await next();
 });
@@ -239,9 +301,20 @@ app.get('/api/ping', (c) => c.json({ ok: true }));
 
 app.post('/api/auth/check', (c) => c.json({ ok: true })); // returns 200 only if middleware passed
 
-// Frontend config — no secrets needed now (Leaflet uses OSM, no key)
+// Frontend config — no secrets, just feature flags
 app.get('/api/config', (c) => c.json({
   map: 'leaflet',
+  features: {
+    llm: !!process.env.MINIMAX_API_KEY,
+    search: !!process.env.TAVILY_API_KEY,
+    attachments: true,
+    backup: true,
+  },
+  limits: {
+    max_file_mb: MAX_FILE_BYTES / 1024 / 1024,
+    max_images_per_item: MAX_IMAGES_PER_ITEM,
+    max_files_per_item: MAX_FILES_PER_ITEM,
+  },
 }));
 
 // List boards (metadata only)
@@ -285,6 +358,11 @@ app.put('/api/boards/:id', async (c) => {
 // Delete board
 app.delete('/api/boards/:id', (c) => {
   const id = c.req.param('id');
+  // Best-effort: also wipe the uploads dir for this board
+  try {
+    const dir = join(UPLOAD_DIR, id);
+    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+  } catch {}
   stmt.clearPlaceCacheForBoard.run(id);
   stmt.clearGuideCacheForBoard.run(id);
   stmt.clearHiddenForBoard.run(id);
@@ -293,6 +371,8 @@ app.delete('/api/boards/:id', (c) => {
   stmt.clearOverridesForBoard.run(id);
   stmt.clearItemOrderForBoard.run(id);
   stmt.clearDayOrderForBoard.run(id);
+  stmt.clearAttachmentsForBoard.run(id);
+  stmt.clearQaForBoard.run(id);
   stmt.deleteBoard.run(id);
   return c.json({ ok: true });
 });
@@ -373,6 +453,7 @@ app.post('/api/boards/:id/items/:itemId/guide', async (c) => {
   const boardId = c.req.param('id');
   const itemId = c.req.param('itemId');
   const refresh = c.req.query('refresh') === '1';
+  const useSearch = c.req.query('search') === '1';
 
   let body;
   try { body = await c.req.json(); } catch { return c.json({ error: 'invalid json' }, 400); }
@@ -382,12 +463,12 @@ app.post('/api/boards/:id/items/:itemId/guide', async (c) => {
     return c.json({ error: 'item.title required' }, 400);
   }
 
-  // Read preference for this board (used both in prompt + hash)
   const settings = boardSettingsObj(boardId);
   const preference = settings.preference || '';
 
+  // Hash includes search flag so search vs non-search are separate cache rows
   const hash = createHash('sha1')
-    .update([item.title || '', item.place || '', item.desc || '', item.category?.type || '', city, preference].join('|'))
+    .update([item.title || '', item.place || '', item.desc || '', item.category?.type || '', city, preference, useSearch ? 's' : 'n'].join('|'))
     .digest('hex');
 
   if (!refresh) {
@@ -399,14 +480,14 @@ app.post('/api/boards/:id/items/:itemId/guide', async (c) => {
 
   let content;
   try {
-    content = await generateGuide(item, city, preference);
+    content = await generateGuide(item, city, preference, { use_search: useSearch });
   } catch (e) {
     return c.json({ error: 'LLM failed: ' + e.message }, 502);
   }
   if (!content) return c.json({ error: 'empty response' }, 502);
 
   stmt.setGuideCache.run(boardId, itemId, hash, content, Date.now());
-  return c.json({ source: 'llm', content });
+  return c.json({ source: useSearch ? 'search' : 'llm', content });
 });
 
 // Hidden items
@@ -459,6 +540,167 @@ function boardSettingsObj(boardId) {
   const obj = {};
   for (const r of rows) obj[r.key] = r.value;
   return obj;
+}
+
+// ===== Attachments =====
+// Disk-space + total-quota guard
+function diskGuard(extraBytes = 0) {
+  // 1) per-file size already enforced at upload time
+  // 2) total upload quota
+  const total = stmt.totalUploadSize.get().s + extraBytes;
+  if (total > MAX_UPLOAD_TOTAL_BYTES) {
+    return { ok: false, code: 507, error: `總上傳量超過上限 (${(MAX_UPLOAD_TOTAL_BYTES / 1024 / 1024 / 1024).toFixed(0)} GB)` };
+  }
+  // 3) disk free space
+  try {
+    const s = statfsSync(UPLOAD_DIR);
+    const free = Number(s.bavail) * Number(s.bsize);
+    if (free < MIN_DISK_FREE_BYTES + extraBytes) {
+      return { ok: false, code: 507, error: `主機磁碟空間不足（剩 ${(free / 1024 / 1024).toFixed(0)} MB）` };
+    }
+  } catch {} // statfsSync absent on some platforms; skip
+  return { ok: true };
+}
+
+const IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/avif']);
+const BLOCKED_EXTS = new Set(['.exe', '.bat', '.cmd', '.sh', '.app', '.scr', '.js', '.vbs']);
+
+// List attachments for a board (lets the parser merge them in)
+app.get('/api/boards/:id/attachments', (c) => {
+  const rows = stmt.listAttachmentsForBoard.all(c.req.param('id'));
+  return c.json({ attachments: rows.map(toAttachmentDTO) });
+});
+
+// Upload one or more attachments to an item
+app.post('/api/boards/:id/items/:itemId/attachments', async (c) => {
+  const boardId = c.req.param('id');
+  const itemId = c.req.param('itemId');
+
+  const form = await c.req.formData().catch(() => null);
+  if (!form) return c.json({ error: 'expected multipart/form-data' }, 400);
+
+  const files = form.getAll('file').filter(f => f && typeof f === 'object' && 'arrayBuffer' in f);
+  if (files.length === 0) return c.json({ error: 'no file' }, 400);
+
+  // Counts guard
+  const counts = stmt.countAttachmentsForItem.get(boardId, itemId);
+  const newImages = files.filter(f => IMAGE_MIMES.has(f.type)).length;
+  if (counts.c + files.length > MAX_FILES_PER_ITEM) {
+    return c.json({ error: `每張卡片附件上限 ${MAX_FILES_PER_ITEM} 個` }, 400);
+  }
+  if (counts.img + newImages > MAX_IMAGES_PER_ITEM) {
+    return c.json({ error: `每張卡片圖片上限 ${MAX_IMAGES_PER_ITEM} 張` }, 400);
+  }
+
+  const results = [];
+  for (const file of files) {
+    const ext = (extname(file.name || '') || '').toLowerCase();
+    if (BLOCKED_EXTS.has(ext)) {
+      return c.json({ error: `不允許的副檔名：${ext}` }, 400);
+    }
+    if (file.size > MAX_FILE_BYTES) {
+      return c.json({ error: `${file.name} 超過單檔上限 ${(MAX_FILE_BYTES / 1024 / 1024)} MB` }, 413);
+    }
+    const guard = diskGuard(file.size);
+    if (!guard.ok) return c.json({ error: guard.error }, guard.code);
+
+    const buf = Buffer.from(await file.arrayBuffer());
+    const id = 'att_' + randomBytes(10).toString('hex');
+    const isImage = IMAGE_MIMES.has(file.type);
+    const safeName = (file.name || 'file').replace(/[^\w.一-龥\-]/g, '_').slice(0, 100);
+
+    const itemDir = join(UPLOAD_DIR, boardId, itemId);
+    if (!existsSync(itemDir)) mkdirSync(itemDir, { recursive: true });
+
+    const origFile = `${id}${ext || ''}`;
+    const origPath = join(itemDir, origFile);
+    await writeFile(origPath, buf);
+
+    let thumbPath = null;
+    let mediumPath = null;
+    if (isImage) {
+      const thumbFile = `${id}_thumb.webp`;
+      const mediumFile = `${id}_medium.webp`;
+      try {
+        await sharp(buf).rotate().resize(300, 300, { fit: 'cover' }).webp({ quality: 70 }).toFile(join(itemDir, thumbFile));
+        thumbPath = `${boardId}/${itemId}/${thumbFile}`;
+      } catch (e) { console.warn('thumb gen failed', e.message); }
+      try {
+        await sharp(buf).rotate().resize(800, 800, { fit: 'inside', withoutEnlargement: true }).webp({ quality: 80 }).toFile(join(itemDir, mediumFile));
+        mediumPath = `${boardId}/${itemId}/${mediumFile}`;
+      } catch (e) { console.warn('medium gen failed', e.message); }
+    }
+
+    const posRow = stmt.maxAttachmentPos.get(boardId, itemId);
+    const pos = (posRow?.m || 0) + 1024;
+    stmt.insertAttachment.run({
+      id, board_id: boardId, item_id: itemId,
+      kind: isImage ? 'image' : 'file',
+      original_name: safeName,
+      mime: file.type || 'application/octet-stream',
+      size: file.size,
+      rel_path: `${boardId}/${itemId}/${origFile}`,
+      thumb_path: thumbPath, medium_path: mediumPath,
+      pos, created_at: Date.now(),
+    });
+    results.push({ id, original_name: safeName, kind: isImage ? 'image' : 'file' });
+  }
+  return c.json({ ok: true, attachments: results });
+});
+
+// Delete one attachment
+app.delete('/api/attachments/:id', async (c) => {
+  const a = stmt.getAttachment.get(c.req.param('id'));
+  if (!a) return c.json({ error: 'not found' }, 404);
+  for (const p of [a.rel_path, a.thumb_path, a.medium_path]) {
+    if (!p) continue;
+    try { await unlink(join(UPLOAD_DIR, p)); } catch {}
+  }
+  stmt.deleteAttachment.run(a.id);
+  return c.json({ ok: true });
+});
+
+// Serve attachment files
+function streamFile(c, fullPath, fallbackMime) {
+  if (!existsSync(fullPath)) return c.json({ error: 'not found' }, 404);
+  const stream = createReadStream(fullPath);
+  return new Response(stream, {
+    headers: { 'Content-Type': fallbackMime, 'Cache-Control': 'private, max-age=31536000, immutable' },
+  });
+}
+app.get('/api/attachments/:id/thumb', (c) => {
+  const a = stmt.getAttachment.get(c.req.param('id'));
+  if (!a) return c.json({ error: 'not found' }, 404);
+  return streamFile(c, join(UPLOAD_DIR, a.thumb_path || a.rel_path), 'image/webp');
+});
+app.get('/api/attachments/:id/medium', (c) => {
+  const a = stmt.getAttachment.get(c.req.param('id'));
+  if (!a) return c.json({ error: 'not found' }, 404);
+  return streamFile(c, join(UPLOAD_DIR, a.medium_path || a.rel_path), 'image/webp');
+});
+app.get('/api/attachments/:id/original', (c) => {
+  const a = stmt.getAttachment.get(c.req.param('id'));
+  if (!a) return c.json({ error: 'not found' }, 404);
+  if (!existsSync(join(UPLOAD_DIR, a.rel_path))) return c.json({ error: 'not found' }, 404);
+  const stream = createReadStream(join(UPLOAD_DIR, a.rel_path));
+  return new Response(stream, {
+    headers: {
+      'Content-Type': a.mime,
+      'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(a.original_name)}`,
+    },
+  });
+});
+
+function toAttachmentDTO(row) {
+  return {
+    id: row.id,
+    item_id: row.item_id,
+    kind: row.kind,
+    original_name: row.original_name,
+    mime: row.mime,
+    size: row.size,
+    pos: row.pos,
+  };
 }
 
 // ===== Custom items =====
@@ -666,6 +908,243 @@ async function fetchPhoton(q) {
     source: 'photon',
   };
 }
+
+// ===== Backup / Restore =====
+// Export one board as a .zip (DB rows + uploaded files for that board)
+app.get('/api/boards/:id/export', async (c) => {
+  const boardId = c.req.param('id');
+  const board = stmt.getBoard.get(boardId);
+  if (!board) return c.json({ error: 'not found' }, 404);
+
+  const data = {
+    version: 1,
+    exported_at: Date.now(),
+    board: {
+      id: board.id,
+      name: board.name,
+      raw_json: JSON.parse(board.raw_json),
+      imported_at: board.imported_at,
+      updated_at: board.updated_at,
+    },
+    custom_items: stmt.listCustomItems.all(boardId),
+    overrides: stmt.listOverrides.all(boardId),
+    hidden: stmt.listHidden.all(boardId).map(r => r.item_id),
+    settings: boardSettingsObj(boardId),
+    item_order: stmt.listItemOrder.all(boardId),
+    day_order: stmt.listDayOrder.all(boardId),
+    route_off: db.prepare('SELECT item_id FROM route_off WHERE board_id = ?').all(boardId).map(r => r.item_id),
+    guide_cache: db.prepare('SELECT item_id, item_hash, content, cached_at FROM guide_cache WHERE board_id = ?').all(boardId),
+    place_cache: db.prepare('SELECT day_date, items_hash, places_json, source, cached_at FROM place_cache WHERE board_id = ?').all(boardId),
+    qa: stmt.listQaForBoard.all(boardId),
+    attachments: stmt.listAttachmentsForBoard.all(boardId),
+  };
+
+  const zip = new AdmZip();
+  zip.addFile('board.json', Buffer.from(JSON.stringify(data, null, 2), 'utf8'));
+
+  // Add uploaded files referenced by attachments
+  for (const a of data.attachments) {
+    for (const p of [a.rel_path, a.thumb_path, a.medium_path]) {
+      if (!p) continue;
+      const full = join(UPLOAD_DIR, p);
+      if (existsSync(full)) {
+        try {
+          const buf = await readFile(full);
+          zip.addFile(`uploads/${p}`, buf);
+        } catch {}
+      }
+    }
+  }
+
+  const buf = zip.toBuffer();
+  const niceName = `board-${board.id}-${Date.now()}.zip`;
+  const fullName = `board-${board.name}-${Date.now()}.zip`;
+  return new Response(buf, {
+    headers: {
+      'Content-Type': 'application/zip',
+      // RFC 5987 — ASCII fallback + UTF-8 encoded filename*
+      'Content-Disposition': `attachment; filename="${niceName}"; filename*=UTF-8''${encodeURIComponent(fullName)}`,
+    },
+  });
+});
+
+// Import a board from a previously-exported .zip
+app.post('/api/boards/import', async (c) => {
+  const form = await c.req.formData().catch(() => null);
+  if (!form) return c.json({ error: 'expected multipart/form-data' }, 400);
+  const file = form.get('file');
+  if (!file || typeof file.arrayBuffer !== 'function') return c.json({ error: 'no file' }, 400);
+
+  const guard = diskGuard(file.size);
+  if (!guard.ok) return c.json({ error: guard.error }, guard.code);
+
+  const buf = Buffer.from(await file.arrayBuffer());
+  let zip;
+  try { zip = new AdmZip(buf); } catch (e) { return c.json({ error: 'invalid zip: ' + e.message }, 400); }
+
+  const boardEntry = zip.getEntry('board.json');
+  if (!boardEntry) return c.json({ error: 'board.json missing in zip' }, 400);
+
+  let data;
+  try { data = JSON.parse(boardEntry.getData().toString('utf8')); } catch (e) { return c.json({ error: 'board.json invalid: ' + e.message }, 400); }
+  if (!data?.board) return c.json({ error: 'missing board' }, 400);
+
+  // Assign new id (always, per Rain's spec) + bump name with suffix
+  const newBoardId = 'imp_' + randomBytes(8).toString('hex');
+  let newName = data.board.name || '匯入行程';
+  // Disambiguate name if exists
+  const existing = stmt.listBoards.all().map(r => r.name);
+  if (existing.includes(newName)) {
+    let n = 2;
+    while (existing.includes(`${newName} (匯入 ${n})`)) n++;
+    newName = `${newName} (匯入 ${n})`;
+  }
+
+  // ID-remap for items: custom items keep new ids; trello items keep original ids;
+  // attachments / overrides / orders / qa key off the original item id which we keep.
+  // (Custom items' ids must be remapped to avoid collision in custom_items PK.)
+  const idMap = new Map();
+  for (const c of data.custom_items || []) {
+    const newItemId = 'cust_' + randomBytes(10).toString('hex');
+    idMap.set(c.id, newItemId);
+  }
+  const mapId = (id) => idMap.get(id) || id;
+
+  const tx = db.transaction(() => {
+    const now = Date.now();
+    stmt.upsertBoard.run({
+      id: newBoardId,
+      name: newName,
+      raw_json: JSON.stringify(data.board.raw_json),
+      imported_at: now,
+      updated_at: now,
+    });
+    for (const ci of (data.custom_items || [])) {
+      const newId = idMap.get(ci.id);
+      stmt.insertCustomItem.run(newId, newBoardId, ci.day_date, ci.payload, ci.pos, now, now);
+    }
+    for (const ov of (data.overrides || [])) {
+      stmt.upsertOverride.run(newBoardId, mapId(ov.item_id), ov.payload, now);
+    }
+    for (const hid of (data.hidden || [])) {
+      stmt.addHidden.run(newBoardId, mapId(hid));
+    }
+    for (const [k, v] of Object.entries(data.settings || {})) {
+      stmt.setBoardSetting.run(newBoardId, k, String(v));
+    }
+    for (const r of (data.item_order || [])) {
+      stmt.upsertItemOrder.run(newBoardId, mapId(r.item_id), r.day_date, r.pos);
+    }
+    for (const r of (data.day_order || [])) {
+      stmt.upsertDayOrder.run(newBoardId, r.day_date, r.pos);
+    }
+    for (const off of (data.route_off || [])) {
+      stmt.insertRouteOff.run(newBoardId, mapId(off));
+    }
+    for (const g of (data.guide_cache || [])) {
+      stmt.setGuideCache.run(newBoardId, mapId(g.item_id), g.item_hash, g.content, g.cached_at);
+    }
+    for (const p of (data.place_cache || [])) {
+      stmt.setPlaceCache.run(newBoardId, p.day_date, p.items_hash, p.places_json, p.source, p.cached_at);
+    }
+    for (const q of (data.qa || [])) {
+      const newQaId = 'qa_' + randomBytes(8).toString('hex');
+      stmt.insertQa.run(newQaId, newBoardId, mapId(q.item_id), q.question, q.answer, q.source, q.created_at);
+    }
+    for (const a of (data.attachments || [])) {
+      // attachments table stores rel_path under boardId/itemId/file — remap board+item parts
+      const newId = 'att_' + randomBytes(10).toString('hex');
+      const newItemId = mapId(a.item_id);
+      const newRel = a.rel_path?.replace(`${data.board.id}/${a.item_id}`, `${newBoardId}/${newItemId}`)
+                   ?? `${newBoardId}/${newItemId}/${newId}`;
+      const newThumb = a.thumb_path?.replace(`${data.board.id}/${a.item_id}`, `${newBoardId}/${newItemId}`) || null;
+      const newMedium = a.medium_path?.replace(`${data.board.id}/${a.item_id}`, `${newBoardId}/${newItemId}`) || null;
+      stmt.insertAttachment.run({
+        id: newId,
+        board_id: newBoardId,
+        item_id: newItemId,
+        kind: a.kind,
+        original_name: a.original_name,
+        mime: a.mime,
+        size: a.size,
+        rel_path: newRel,
+        thumb_path: newThumb,
+        medium_path: newMedium,
+        pos: a.pos,
+        created_at: a.created_at || Date.now(),
+      });
+      // Extract physical file from zip and write to disk
+      for (const [oldP, newP] of [[a.rel_path, newRel], [a.thumb_path, newThumb], [a.medium_path, newMedium]]) {
+        if (!oldP || !newP) continue;
+        const entry = zip.getEntry(`uploads/${oldP}`);
+        if (entry) {
+          const buf2 = entry.getData();
+          const dir = dirname(join(UPLOAD_DIR, newP));
+          if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+          // sync write to keep inside transaction logically (small files ok)
+          try { writeFileSync(join(UPLOAD_DIR, newP), buf2); } catch {}
+        }
+      }
+    }
+  });
+  try {
+    tx();
+  } catch (e) {
+    return c.json({ error: 'import failed: ' + e.message }, 500);
+  }
+  return c.json({ ok: true, id: newBoardId, name: newName });
+});
+
+// ===== Q&A =====
+// List Q&A for an item
+app.get('/api/boards/:id/items/:itemId/qa', (c) => {
+  const rows = stmt.listQa.all(c.req.param('id'), c.req.param('itemId'));
+  return c.json({ qa: rows });
+});
+
+// Ask a new question
+// Body: { question, item, day_context, board_context, use_search }
+app.post('/api/boards/:id/items/:itemId/qa', async (c) => {
+  const boardId = c.req.param('id');
+  const itemId = c.req.param('itemId');
+  const body = await c.req.json();
+  const question = (body?.question || '').trim();
+  if (!question) return c.json({ error: 'question required' }, 400);
+
+  const useSearch = !!body?.use_search;
+  const settings = boardSettingsObj(boardId);
+  const preference = settings.preference || '';
+
+  let content;
+  try {
+    content = await generateAnswer({
+      question,
+      item: body.item || {},
+      city: body.city || '',
+      day_summary: body.day_summary || '',
+      board_name: body.board_name || '',
+      preference,
+      use_search: useSearch,
+    });
+  } catch (e) {
+    return c.json({ error: 'LLM failed: ' + e.message }, 502);
+  }
+  if (!content) return c.json({ error: 'empty response' }, 502);
+
+  const id = 'qa_' + randomBytes(8).toString('hex');
+  stmt.insertQa.run(id, boardId, itemId, question, content, useSearch ? 'search' : 'llm', Date.now());
+  return c.json({ id, question, answer: content, source: useSearch ? 'search' : 'llm', created_at: Date.now() });
+});
+
+app.delete('/api/qa/:id', (c) => {
+  stmt.deleteQa.run(c.req.param('id'));
+  return c.json({ ok: true });
+});
+
+app.delete('/api/boards/:id/items/:itemId/qa', (c) => {
+  stmt.clearQaForItem.run(c.req.param('id'), c.req.param('itemId'));
+  return c.json({ ok: true });
+});
 
 // Setting: active board id (so the same user gets the same board on any device)
 app.get('/api/settings/active', (c) => {

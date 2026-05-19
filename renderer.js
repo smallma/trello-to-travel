@@ -17,8 +17,15 @@ let isCustomCb = () => false;
 let getHiddenCb = null;
 let isEditingRouteCb = () => false;
 let geocodeCb = null;
-let onReorderItemsCb = null;   // (dayDate, itemIds[]) => Promise
-let onReorderDaysCb = null;    // (dayDates[]) => Promise
+let onReorderItemsCb = null;
+let onReorderDaysCb = null;
+let getAttachmentsForItemCb = null;   // (itemId) => Array
+let getAttachmentUrlCb = null;        // (id, variant) => string
+let deleteAttachmentCb = null;        // (id) => Promise
+let fetchQaCb = null;                 // (itemId) => Promise<Array>
+let askQaCb = null;                   // (itemId, payload) => Promise<{id,question,answer,source,created_at}>
+let deleteQaCb = null;                // (id) => Promise
+let getFeaturesCb = () => ({});       // () => {llm, search}
 const placesCache = new Map();
 
 export function setRouteHandlers(opts) {
@@ -36,6 +43,13 @@ export function setRouteHandlers(opts) {
   geocodeCb = opts.geocode;
   onReorderItemsCb = opts.onReorderItems;
   onReorderDaysCb = opts.onReorderDays;
+  getAttachmentsForItemCb = opts.getAttachmentsForItem;
+  getAttachmentUrlCb = opts.getAttachmentUrl;
+  deleteAttachmentCb = opts.deleteAttachment;
+  fetchQaCb = opts.fetchQa;
+  askQaCb = opts.askQa;
+  deleteQaCb = opts.deleteQa;
+  if (opts.getFeatures) getFeaturesCb = opts.getFeatures;
 }
 
 export function resetPlacesCache() {
@@ -290,6 +304,143 @@ function numberedIcon(n) {
   });
 }
 
+function buildQaSection(item, day) {
+  const features = getFeaturesCb();
+  const qa = el('div', 'tl-qa');
+  qa.innerHTML = `
+    <div class="tl-qa-header">
+      <span>💬 <strong>問問題</strong></span>
+    </div>
+    <form class="tl-qa-form">
+      <input class="tl-qa-input" placeholder="問這個景點任何問題…">
+      <button type="button" class="tl-qa-ask" data-mode="llm">一般回覆</button>
+      <button type="button" class="tl-qa-ask tl-qa-ask-search" data-mode="search" ${features.search ? '' : 'disabled title="後端未設定 TAVILY_API_KEY"'}>✨ 最新資訊</button>
+    </form>
+    <div class="tl-qa-list"></div>
+  `;
+  const input = qa.querySelector('.tl-qa-input');
+  const list = qa.querySelector('.tl-qa-list');
+  let loaded = false;
+
+  const renderQa = (rows) => {
+    list.innerHTML = '';
+    for (const row of rows) {
+      list.appendChild(renderQaRow(row));
+    }
+  };
+
+  const renderQaRow = (row) => {
+    const r = el('div', 'tl-qa-row');
+    const sourceTag = row.source === 'search' ? '<span class="tl-qa-source">🌐 含最新搜尋</span>' : '';
+    r.innerHTML = `
+      <div class="tl-qa-q"><strong>Q:</strong> ${escape(row.question)} ${sourceTag}</div>
+      <div class="tl-qa-a"></div>
+      <button class="tl-qa-del" title="刪除這則問答">×</button>
+    `;
+    r.querySelector('.tl-qa-a').innerHTML = window.marked.parse(row.answer || '');
+    r.querySelector('.tl-qa-del').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!confirm('刪除這則問答？')) return;
+      try { await deleteQaCb(row.id); r.remove(); } catch (e2) { alert('刪除失敗：' + e2.message); }
+    });
+    return r;
+  };
+
+  const loadList = async () => {
+    if (loaded) return;
+    try {
+      const rows = await fetchQaCb(item.id);
+      renderQa(rows);
+      loaded = true;
+    } catch {}
+  };
+  card.dataset && card.addEventListener && card.addEventListener('cardExpanded', loadList);
+
+  const ask = async (useSearch) => {
+    const q = input.value.trim();
+    if (!q) return;
+    input.disabled = true;
+    const tmp = el('div', 'tl-qa-row');
+    tmp.innerHTML = `<div class="tl-qa-q"><strong>Q:</strong> ${escape(q)}</div><div class="tl-qa-a"><em class="muted">⏳ AI 思考中…</em></div>`;
+    list.insertBefore(tmp, list.firstChild);
+    try {
+      const daySummary = day ? day.items.map(it => {
+        const t = it.time_start ? `${it.time_start} ` : '';
+        return `- ${t}${it.title}`;
+      }).join('\n') : '';
+      const res = await askQaCb(item.id, {
+        question: q,
+        item: { id: item.id, title: item.title, category: item.category, place: item.place, desc: item.desc },
+        city: day ? extractCity(day.list_name) : '',
+        day_summary: daySummary,
+        board_name: document.getElementById('trip-title')?.textContent || '',
+        use_search: useSearch,
+      });
+      tmp.replaceWith(renderQaRow(res));
+      input.value = '';
+    } catch (e) {
+      tmp.querySelector('.tl-qa-a').innerHTML = `<em class="muted" style="color:#dc2626">⚠️ ${escape(e.message)}</em>`;
+    } finally {
+      input.disabled = false;
+    }
+  };
+
+  qa.querySelectorAll('.tl-qa-ask').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (btn.disabled) return;
+      ask(btn.dataset.mode === 'search');
+    });
+  });
+  // declared 'card' lives in the enclosing renderTimelineRow scope; we don't have direct
+  // access here, but cardExpanded bubbles up — listen on the QA element itself when it's
+  // appended into the card. Instead we hook into the closest .tl-card after mount via
+  // setTimeout so the parent attaches first.
+  setTimeout(() => {
+    const owner = qa.closest('.tl-card');
+    if (owner) owner.addEventListener('cardExpanded', loadList);
+  }, 0);
+
+  return qa;
+}
+
+function buildFileAttachments(atts) {
+  const wrap = el('div', 'tl-files');
+  wrap.innerHTML = '<div class="tl-files-h">📎 附件</div>';
+  for (const a of atts) {
+    const row = el('div', 'tl-file-row');
+    const url = getAttachmentUrlCb(a.id, 'original');
+    row.innerHTML = `
+      <a class="tl-file-name" href="${escape(url)}" download="${escape(a.original_name)}">${fileIcon(a.mime)} ${escape(a.original_name)}</a>
+      <span class="tl-file-size">${fmtSize(a.size)}</span>
+      <button class="tl-file-del" title="刪除">×</button>
+    `;
+    row.querySelector('.tl-file-del').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!confirm(`刪除附件「${a.original_name}」？`)) return;
+      try { await deleteAttachmentCb(a.id); } catch (e2) { alert(e2.message); }
+    });
+    wrap.appendChild(row);
+  }
+  return wrap;
+}
+
+function fileIcon(mime) {
+  if (!mime) return '📄';
+  if (mime.includes('pdf')) return '📕';
+  if (mime.includes('word') || mime.includes('document')) return '📘';
+  if (mime.includes('sheet') || mime.includes('excel')) return '📗';
+  if (mime.startsWith('audio/')) return '🎵';
+  if (mime.startsWith('video/')) return '🎬';
+  if (mime.includes('zip') || mime.includes('compressed')) return '🗜️';
+  return '📄';
+}
+function fmtSize(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1024 * 1024) return (b / 1024).toFixed(0) + ' KB';
+  return (b / 1024 / 1024).toFixed(1) + ' MB';
+}
+
 function appendOpenLink(header, url) {
   const a = el('a', 'open-ext', '在 Google Maps 開啟 ↗');
   a.href = url;
@@ -464,27 +615,36 @@ function renderTimelineRow(item, day) {
 
     // AI guide block (lazy)
     if (guideEnabled) {
+      const features = getFeaturesCb();
+      const searchBtn = features.search
+        ? `<button class="tl-guide-search" title="用網路搜尋最新資訊重寫">✨ 搜尋最新</button>`
+        : `<button class="tl-guide-search" disabled title="後端未設定 TAVILY_API_KEY">✨ 搜尋最新</button>`;
       const guideBox = el('div', 'tl-guide');
       guideBox.innerHTML = `
         <div class="tl-guide-header">
           <span>🎙️ <strong>AI 導遊</strong></span>
-          <button class="tl-guide-refresh" title="重新生成">↻</button>
+          <span class="tl-guide-actions">
+            <button class="tl-guide-refresh" title="MiniMax 重新生成">↻</button>
+            ${searchBtn}
+          </span>
         </div>
         <div class="tl-guide-body"><em class="muted">點「展開更多」首次載入…</em></div>
+        <div class="tl-guide-warning">⚠️ AI 回答僅供參考，行前請查當地官網確認</div>
       `;
       const refreshBtn = guideBox.querySelector('.tl-guide-refresh');
+      const searchBtnEl = guideBox.querySelector('.tl-guide-search');
       const bodyEl = guideBox.querySelector('.tl-guide-body');
       let loaded = false;
-      const loadGuide = async (refresh = false) => {
+      const loadGuide = async ({ refresh = false, search = false } = {}) => {
         bodyEl.innerHTML = '<em class="muted">⏳ AI 撰寫中（最多 60 秒）…</em>';
         try {
           const city = day ? extractCity(day.list_name) : '';
           const res = await fetchGuideCb(item.id, {
             item: { id: item.id, title: item.title, category: item.category, place: item.place, desc: item.desc },
             city,
-          }, { refresh });
+          }, { refresh, search });
           bodyEl.innerHTML = window.marked.parse(res.content || '');
-          const tag = res.source === 'cache' ? '快取' : 'AI';
+          const tag = res.source === 'cache' ? '🤖 快取' : (res.source === 'search' ? '🌐 含最新搜尋' : '🤖 AI');
           bodyEl.appendChild(Object.assign(document.createElement('div'), {
             className: 'tl-guide-meta',
             textContent: '— ' + tag,
@@ -494,14 +654,26 @@ function renderTimelineRow(item, day) {
           bodyEl.innerHTML = `<em class="muted">⚠️ 載入失敗：${escape(e.message)}</em>`;
         }
       };
-      refreshBtn.addEventListener('click', e => {
+      refreshBtn.addEventListener('click', e => { e.stopPropagation(); loadGuide({ refresh: true }); });
+      searchBtnEl.addEventListener('click', e => {
         e.stopPropagation();
-        loadGuide(true);
+        if (searchBtnEl.disabled) return;
+        loadGuide({ refresh: true, search: true });
       });
-      // Lazy: trigger on first expand
-      const trigger = () => { if (!loaded) loadGuide(false); };
+      const trigger = () => { if (!loaded) loadGuide(); };
       card.addEventListener('cardExpanded', trigger, { once: false });
       detail.appendChild(guideBox);
+
+      // Q&A
+      if (fetchQaCb) {
+        detail.appendChild(buildQaSection(item, day));
+      }
+    }
+
+    // Uploaded file attachments (non-image)
+    const fileAtts = (getAttachmentsForItemCb?.(item.id) || []).filter(a => a.kind !== 'image');
+    if (fileAtts.length) {
+      detail.appendChild(buildFileAttachments(fileAtts));
     }
 
     if (item.desc) {
