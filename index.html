@@ -115,19 +115,21 @@
             </div>
           </div>
 
-          <label class="modal-label">地點 <span class="modal-hint">（用於地圖定位）</span></label>
-          <input id="it-fld-place" class="modal-input" placeholder="例 Stephansdom, Vienna">
-
           <label class="modal-label">描述 / 備註</label>
           <textarea id="it-fld-desc" class="modal-input" rows="3"></textarea>
 
-          <label class="modal-label">圖片 URL <span class="modal-hint">（單張）</span></label>
-          <input id="it-fld-image" class="modal-input" placeholder="https://...">
+          <details class="modal-advanced">
+            <summary>進階選項（地點、連結）</summary>
+            <label class="modal-label">地點 <span class="modal-hint">留空也可以，地圖會用標題去找；填寫越精確越準</span></label>
+            <input id="it-fld-place" class="modal-input" placeholder="例 Stephansdom, Vienna">
 
-          <label class="modal-label">相關連結 <span class="modal-hint">一行一個</span></label>
-          <textarea id="it-fld-links" class="modal-input" rows="2" placeholder="https://..."></textarea>
+            <label class="modal-label">相關連結 <span class="modal-hint">一行一個</span></label>
+            <textarea id="it-fld-links" class="modal-input" rows="2" placeholder="https://..."></textarea>
 
-          <label class="modal-label">附件 <span class="modal-hint">圖片自動產縮圖；單檔 10MB；圖片 20 張、檔案 30 個上限</span></label>
+            <input id="it-fld-image" type="hidden">
+          </details>
+
+          <label class="modal-label">附件 <span class="modal-hint">圖片自動產縮圖；單檔 10MB；圖片 20 張、檔案 30 個上限。<strong>第一張圖片就是封面</strong>（hover 圖片可改）</span></label>
           <div id="it-dropzone" class="dropzone">
             <p>把檔案拖進來，或 <label class="dz-pick">點此選擇<input type="file" multiple hidden></label></p>
             <div id="it-dz-status" class="dz-status"></div>

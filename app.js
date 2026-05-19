@@ -569,15 +569,43 @@ async function openItemEditor({ mode, item, day }) {
         attList.innerHTML = '<em class="muted">尚無附件</em>';
         return;
       }
+      // First image in pos order is the cover
+      const firstImageId = (atts.find(a => a.kind === 'image') || {}).id;
       for (const a of atts) {
         const row = document.createElement('div');
         row.className = 'attach-row';
+        const isCover = a.id === firstImageId;
         if (a.kind === 'image') {
           row.innerHTML = `<img class="attach-thumb" src="${escapeAttr(store.attachmentUrl(a.id, 'thumb'))}" alt="">`;
         } else {
           row.innerHTML = `<span class="attach-icon">📄</span>`;
         }
-        row.insertAdjacentHTML('beforeend', `<span class="attach-name">${escapeHtml(a.original_name)}</span><span class="attach-size">${fmtBytes(a.size)}</span>`);
+        const coverTag = isCover ? `<span class="attach-cover-tag" title="目前的封面">⭐ 封面</span>` : '';
+        row.insertAdjacentHTML('beforeend', `<span class="attach-name">${escapeHtml(a.original_name)}${coverTag}</span><span class="attach-size">${fmtBytes(a.size)}</span>`);
+
+        // ⭐ Set-as-cover button (only for images, only when NOT already cover)
+        if (a.kind === 'image' && !isCover) {
+          const star = document.createElement('button');
+          star.className = 'attach-cover-btn';
+          star.textContent = '⭐';
+          star.title = '設為封面';
+          star.addEventListener('click', async (e) => {
+            e.preventDefault();
+            try {
+              await store.setAttachmentCover(a.id);
+              // local re-order: move this att to the front
+              const arr = attachmentsByItem.get(itemId);
+              const i = arr.findIndex(x => x.id === a.id);
+              if (i >= 0) {
+                arr.splice(i, 1);
+                arr.unshift(a);
+              }
+              refreshAttList();
+            } catch (e2) { alert(e2.message); }
+          });
+          row.appendChild(star);
+        }
+
         const del = document.createElement('button');
         del.className = 'attach-del'; del.textContent = '×'; del.title = '刪除';
         del.addEventListener('click', async (e) => {

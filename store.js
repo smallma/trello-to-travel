@@ -155,6 +155,9 @@ export async function uploadAttachments(boardId, itemId, files) {
 export async function deleteAttachment(attachmentId) {
   await api(`/api/attachments/${encodeURIComponent(attachmentId)}`, { method: 'DELETE' });
 }
+export async function setAttachmentCover(attachmentId) {
+  await api(`/api/attachments/${encodeURIComponent(attachmentId)}/cover`, { method: 'POST' });
+}
 // URL helpers — embed password in query so <img>/<a download> work without headers
 export function attachmentUrl(attachmentId, variant) {
   return `/api/attachments/${encodeURIComponent(attachmentId)}/${variant}?pw=${encodeURIComponent(getPassword())}`;

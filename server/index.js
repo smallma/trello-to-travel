@@ -656,6 +656,17 @@ app.post('/api/boards/:id/items/:itemId/attachments', async (c) => {
   return c.json({ ok: true, attachments: results });
 });
 
+// Set an attachment as the cover (= shift it to pos before all others in the item)
+app.post('/api/attachments/:id/cover', (c) => {
+  const a = stmt.getAttachment.get(c.req.param('id'));
+  if (!a) return c.json({ error: 'not found' }, 404);
+  // Find current min pos for the item, put this one before it
+  const row = db.prepare('SELECT MIN(pos) AS m FROM attachments WHERE board_id = ? AND item_id = ?').get(a.board_id, a.item_id);
+  const newPos = (row?.m ?? 1024) - 512;
+  db.prepare('UPDATE attachments SET pos = ? WHERE id = ?').run(newPos, a.id);
+  return c.json({ ok: true });
+});
+
 // Delete one attachment
 app.delete('/api/attachments/:id', async (c) => {
   const a = stmt.getAttachment.get(c.req.param('id'));

@@ -373,6 +373,17 @@ body.editing-route .tl-card:hover { outline: 1px dashed #d4d2c8; outline-offset:
 .attach-size { color: var(--muted); font-size: 11.5px; }
 .attach-del { background: none; border: none; color: #9ca3af; cursor: pointer; font-size: 14px; padding: 0 6px; border-radius: 3px; }
 .attach-del:hover { color: #dc2626; background: #fee2e2; }
+.attach-cover-btn { background: none; border: 1px solid var(--line); color: #ca8a04; cursor: pointer; font-size: 13px; padding: 1px 6px; border-radius: 3px; transition: background .15s, color .15s; }
+.attach-cover-btn:hover { background: #fef3c7; }
+.attach-cover-tag { display: inline-block; margin-left: 6px; font-size: 10.5px; padding: 1px 6px; background: #fef3c7; color: #854d0e; border-radius: 8px; font-weight: 600; }
+
+/* Modal: advanced section */
+.modal-advanced { margin: 10px 0; padding: 0; border: 1px dashed var(--line); border-radius: 6px; }
+.modal-advanced summary { cursor: pointer; padding: 8px 12px; font-size: 12.5px; color: var(--muted); user-select: none; }
+.modal-advanced summary:hover { background: #f9fafb; color: var(--brand); }
+.modal-advanced[open] summary { border-bottom: 1px dashed var(--line); margin-bottom: 8px; }
+.modal-advanced > :not(summary) { padding: 0 12px; }
+.modal-advanced > .modal-label:first-of-type { padding-top: 0; }
 
 /* Toolbar export/import */
 .upload-import { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border: 1px solid var(--brand); color: var(--brand); border-radius: 5px; font-size: 13px; cursor: pointer; background: #fff; transition: background .15s, color .15s; }
