@@ -51,6 +51,28 @@ setRouteHandlers({
   },
   onEditItem: (item, day) => openItemEditor({ mode: 'edit', item, day }),
   onAddItem: (day) => openItemEditor({ mode: 'add', day }),
+  onReorderItems: async (dayDate, itemIds) => {
+    if (!activeBoardId) return;
+    try {
+      await store.saveItemOrder(activeBoardId, dayDate, itemIds);
+      showToast('順序已儲存');
+      // Re-render only the affected day's map (place inputs may have changed)
+      resetPlacesCache();
+      const block = document.querySelector(`[data-day-date="${dayDate}"]`);
+      const mapWrap = block && block.querySelector('[data-day-map]');
+      if (mapWrap && currentData) {
+        const day = currentData.days.find(d => d.date === dayDate);
+        if (day) renderDayMap(mapWrap, day);
+      }
+    } catch (e) { showError('儲存順序失敗：' + e.message); }
+  },
+  onReorderDays: async (dayDates) => {
+    if (!activeBoardId) return;
+    try {
+      await store.saveDayOrder(activeBoardId, dayDates);
+      showToast('天數順序已儲存');
+    } catch (e) { showError('儲存天數順序失敗：' + e.message); }
+  },
 });
 
 // ---------- Password gate ----------
@@ -181,17 +203,21 @@ async function loadActiveBoard() {
     const data = parseTrello(board.raw);
     await store.loadRouteOff(activeBoardId);
     try { hiddenIds = await store.fetchHidden(activeBoardId); } catch { hiddenIds = new Set(); }
+    let itemOrder = {};
+    let dayOrder = {};
     try {
       const extras = await store.fetchExtras(activeBoardId);
       customItems = extras.custom || [];
       overrides = extras.overrides || {};
+      itemOrder = extras.item_order || {};
+      dayOrder = extras.day_order || {};
     } catch {
       customItems = []; overrides = {};
     }
     isCustomId = new Set(customItems.map(c => c.id));
 
-    // Merge custom items + apply overrides
-    const merged = mergeBoardData(data, customItems, overrides);
+    // Merge + apply user-defined order (overrides Trello's pos)
+    const merged = mergeBoardData(data, customItems, overrides, itemOrder, dayOrder);
     currentData = merged;
     hideBanner();
     if (data.warnings.length) showWarning(data.warnings.join('；'));
@@ -202,23 +228,78 @@ async function loadActiveBoard() {
   }
 }
 
-function mergeBoardData(data, customs, overrides) {
-  const byDay = new Map();
-  for (const c of customs) {
-    if (!byDay.has(c.day_date)) byDay.set(c.day_date, []);
-    byDay.get(c.day_date).push({ ...c, _custom: true });
-  }
+function mergeBoardData(data, customs, overrides, itemOrder = {}, dayOrder = {}) {
   const applyOverride = (it) => {
     const ov = overrides[it.id];
     return ov ? { ...it, ...ov } : it;
   };
-  const days = data.days.map(day => ({
-    ...day,
-    items: [
-      ...day.items.map(applyOverride),
-      ...(byDay.get(day.date) || []),
-    ],
-  }));
+
+  // Collect ALL items (Trello + custom), tagged with their effective day_date.
+  // If item_order has a row for that id, prefer its day_date (handles cross-day moves).
+  const allItems = [];
+  for (const day of data.days) {
+    for (const it of day.items) {
+      const ov = itemOrder[it.id];
+      const dayDate = ov ? ov.day_date : day.date;
+      allItems.push({ item: applyOverride(it), day_date: dayDate });
+    }
+  }
+  for (const c of customs) {
+    const ov = itemOrder[c.id];
+    const dayDate = ov ? ov.day_date : c.day_date;
+    allItems.push({ item: { ...c, _custom: true }, day_date: dayDate });
+  }
+
+  // Group items back per day
+  const itemsByDay = new Map();
+  for (const { item, day_date } of allItems) {
+    if (!itemsByDay.has(day_date)) itemsByDay.set(day_date, []);
+    itemsByDay.get(day_date).push(item);
+  }
+
+  // Sort each day's items by user_pos (or fall back to original Trello order)
+  for (const [dayDate, items] of itemsByDay) {
+    const trelloIndex = new Map();
+    const original = data.days.find(d => d.date === dayDate);
+    if (original) original.items.forEach((it, i) => trelloIndex.set(it.id, i));
+    items.sort((a, b) => {
+      const pa = itemOrder[a.id]?.pos ?? null;
+      const pb = itemOrder[b.id]?.pos ?? null;
+      if (pa != null && pb != null) return pa - pb;
+      if (pa != null) return -1;
+      if (pb != null) return 1;
+      // Both no user pos: keep Trello order, custom items at end
+      const ai = trelloIndex.has(a.id) ? trelloIndex.get(a.id) : 10000 + (a.pos ?? 0);
+      const bi = trelloIndex.has(b.id) ? trelloIndex.get(b.id) : 10000 + (b.pos ?? 0);
+      return ai - bi;
+    });
+  }
+
+  // Build days array — keep every original day even if empty, plus any new day_date
+  // introduced purely by drag (rare but possible).
+  const dayDates = new Set(data.days.map(d => d.date));
+  for (const dd of itemsByDay.keys()) dayDates.add(dd);
+  const days = [...dayDates].map(date => {
+    const original = data.days.find(d => d.date === date);
+    return {
+      list_name: original ? original.list_name : date,
+      date,
+      items: itemsByDay.get(date) || [],
+    };
+  });
+
+  // Sort days: user dayOrder wins; fallback to original Trello order
+  const trelloDayIndex = new Map();
+  data.days.forEach((d, i) => trelloDayIndex.set(d.date, i));
+  days.sort((a, b) => {
+    const pa = dayOrder[a.date];
+    const pb = dayOrder[b.date];
+    if (pa != null && pb != null) return pa - pb;
+    if (pa != null) return -1;
+    if (pb != null) return 1;
+    return (trelloDayIndex.get(a.date) ?? 9999) - (trelloDayIndex.get(b.date) ?? 9999);
+  });
+
   const extras = {};
   for (const [k, items] of Object.entries(data.extras)) {
     extras[k] = items.map(applyOverride);

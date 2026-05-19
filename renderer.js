@@ -17,6 +17,8 @@ let isCustomCb = () => false;
 let getHiddenCb = null;
 let isEditingRouteCb = () => false;
 let geocodeCb = null;
+let onReorderItemsCb = null;   // (dayDate, itemIds[]) => Promise
+let onReorderDaysCb = null;    // (dayDates[]) => Promise
 const placesCache = new Map();
 
 export function setRouteHandlers(opts) {
@@ -32,6 +34,8 @@ export function setRouteHandlers(opts) {
   getHiddenCb = opts.getHidden;
   if (opts.isEditingRoute) isEditingRouteCb = opts.isEditingRoute;
   geocodeCb = opts.geocode;
+  onReorderItemsCb = opts.onReorderItems;
+  onReorderDaysCb = opts.onReorderDays;
 }
 
 export function resetPlacesCache() {
@@ -67,6 +71,50 @@ export function renderApp(data) {
   }
 
   refreshEditRouteMode();
+  initDayDragging();
+  initItemDragging();
+}
+
+function initDayDragging() {
+  if (!onReorderDaysCb || typeof window.Sortable === 'undefined') return;
+  const main = document.getElementById('content');
+  if (!main || main._sortable) return;
+  main._sortable = window.Sortable.create(main, {
+    handle: '.day-drag-handle',
+    animation: 150,
+    ghostClass: 'sortable-ghost',
+    chosenClass: 'sortable-chosen',
+    onEnd: async () => {
+      const days = [...main.querySelectorAll('.day-block')]
+        .map(b => b.dataset.dayDate).filter(Boolean);
+      if (days.length) onReorderDaysCb(days);
+    },
+  });
+}
+
+function initItemDragging() {
+  if (!onReorderItemsCb || typeof window.Sortable === 'undefined') return;
+  document.querySelectorAll('.timeline').forEach(tl => {
+    if (tl._sortable) return;
+    tl._sortable = window.Sortable.create(tl, {
+      group: 'cards',
+      handle: '.tl-drag-handle',
+      draggable: '.tl-row',
+      animation: 150,
+      ghostClass: 'sortable-ghost',
+      chosenClass: 'sortable-chosen',
+      onAdd: (evt) => onItemDropped(evt),
+      onUpdate: (evt) => onItemDropped(evt),
+    });
+  });
+}
+
+function onItemDropped(evt) {
+  const toDayDate = evt.to.closest('.day-block')?.dataset.dayDate;
+  if (!toDayDate) return;
+  const itemIds = [...evt.to.querySelectorAll('.tl-row .tl-card')]
+    .map(c => c.dataset.itemId).filter(Boolean);
+  onReorderItemsCb(toDayDate, itemIds);
 }
 
 function renderDay(day) {
@@ -75,8 +123,12 @@ function renderDay(day) {
   block.dataset.dayDate = day.date;
 
   const header = el('div', 'day-header');
-  header.innerHTML = `<span>${escape(day.list_name)}</span><span class="chev">▾</span>`;
-  header.addEventListener('click', () => block.classList.toggle('collapsed'));
+  header.innerHTML = `<span class="day-drag-handle" title="拖曳調換整天順序">⋮⋮</span><span class="day-name">${escape(day.list_name)}</span><span class="chev">▾</span>`;
+  header.addEventListener('click', (e) => {
+    if (e.target.classList.contains('day-drag-handle')) return;
+    block.classList.toggle('collapsed');
+  });
+  header.querySelector('.day-drag-handle').addEventListener('click', e => e.stopPropagation());
   block.appendChild(header);
 
   const body = el('div', 'day-body');
@@ -158,7 +210,11 @@ export async function renderDayMap(wrap, day, { refresh = false } = {}) {
   appendRefreshBtn(header, wrap, day);
   wrap.appendChild(header);
 
-  // Step 2: render Leaflet map div, then geocode points one by one
+  // List of places (above map) — click jumps to marker
+  const listWrap = el('div', 'day-map-list');
+  wrap.appendChild(listWrap);
+
+  // Map div
   const mapDiv = el('div', 'leaflet-map');
   mapDiv.style.height = '360px';
   wrap.appendChild(mapDiv);
@@ -170,7 +226,7 @@ export async function renderDayMap(wrap, day, { refresh = false } = {}) {
     maxZoom: 19,
   }).addTo(map);
 
-  // Geocode all waypoints (parallel; backend rate-limits Nominatim)
+  // Geocode all waypoints in parallel (backend rate-limits Nominatim)
   const coords = [];
   await Promise.all(waypoints.map(async (wp, i) => {
     try {
@@ -181,30 +237,47 @@ export async function renderDayMap(wrap, day, { refresh = false } = {}) {
     } catch {}
   }));
 
-  const validCoords = coords.filter(Boolean);
+  const markers = [];
+  const validCoords = [];
+  coords.forEach((c, i) => {
+    if (!c) return;
+    validCoords.push(c);
+    const marker = L.marker([c.lat, c.lng], { icon: numberedIcon(i + 1) }).addTo(map);
+    marker.bindPopup(`<strong>${i + 1}.</strong> ${escape(c.label)}`);
+    markers[i] = marker;
+  });
+
   if (validCoords.length === 0) {
     mapDiv.style.display = 'none';
+    listWrap.style.display = 'none';
     wrap.appendChild(el('div', 'day-map-empty', '⚠️ 沒有任何地點可以定位（OSM Nominatim 查不到）。請點上方「在 Google Maps 開啟 ↗」'));
     return;
   }
 
-  // Numbered markers
-  validCoords.forEach((c, idx) => {
-    const realIdx = coords.indexOf(c);
-    const marker = L.marker([c.lat, c.lng], {
-      icon: numberedIcon(realIdx + 1),
-    }).addTo(map);
-    marker.bindPopup(`<strong>${realIdx + 1}.</strong> ${escape(c.label)}`);
-  });
-
-  // Polyline connecting points in order
   L.polyline(validCoords.map(c => [c.lat, c.lng]), {
     color: '#2D5A4E', weight: 2.5, opacity: 0.7, dashArray: '6 8',
   }).addTo(map);
 
-  // Fit bounds
-  const group = L.featureGroup(validCoords.map(c => L.marker([c.lat, c.lng])));
+  const group = L.featureGroup(validCoords.filter(Boolean).map(c => L.marker([c.lat, c.lng])));
   map.fitBounds(group.getBounds(), { padding: [30, 30] });
+
+  // Build clickable list
+  coords.forEach((c, i) => {
+    const chip = el('button', 'day-map-chip' + (c ? '' : ' off'));
+    chip.innerHTML = `<span class="day-map-chip-num">${i + 1}</span><span class="day-map-chip-label">${escape(waypoints[i].q)}</span>`;
+    if (c && markers[i]) {
+      chip.title = '點擊放大此地點';
+      chip.addEventListener('click', () => {
+        map.flyTo([c.lat, c.lng], 16, { duration: 0.6 });
+        markers[i].openPopup();
+        mapDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      });
+    } else {
+      chip.title = '無法定位';
+      chip.disabled = true;
+    }
+    listWrap.appendChild(chip);
+  });
 }
 
 function numberedIcon(n) {
@@ -266,6 +339,14 @@ function renderTimelineRow(item, day) {
 
   const card = el('div', 'tl-card');
   card.dataset.itemId = item.id;
+
+  // Drag handle (left edge)
+  if (onReorderItemsCb) {
+    const dh = el('span', 'tl-drag-handle', '⋮⋮');
+    dh.title = '拖曳調整順序（可跨日）';
+    dh.addEventListener('click', e => e.stopPropagation());
+    card.appendChild(dh);
+  }
 
   // Route checkbox — only shown when body has class "editing-route"
   const canRoute = !!((item.place && item.place.trim()) || item.title);

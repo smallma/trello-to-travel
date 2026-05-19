@@ -95,6 +95,20 @@ db.exec(`
     display    TEXT,
     cached_at  INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS item_order (
+    board_id  TEXT NOT NULL,
+    item_id   TEXT NOT NULL,
+    day_date  TEXT NOT NULL,
+    pos       REAL NOT NULL,
+    PRIMARY KEY (board_id, item_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_item_order_day ON item_order(board_id, day_date);
+  CREATE TABLE IF NOT EXISTS day_order (
+    board_id  TEXT NOT NULL,
+    day_date  TEXT NOT NULL,
+    pos       REAL NOT NULL,
+    PRIMARY KEY (board_id, day_date)
+  );
 `);
 
 const stmt = {
@@ -186,6 +200,26 @@ const stmt = {
       lat = excluded.lat, lng = excluded.lng,
       display = excluded.display, cached_at = excluded.cached_at
   `),
+
+  // Item / day reorder
+  listItemOrder: db.prepare('SELECT item_id, day_date, pos FROM item_order WHERE board_id = ?'),
+  upsertItemOrder: db.prepare(`
+    INSERT INTO item_order (board_id, item_id, day_date, pos)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(board_id, item_id) DO UPDATE SET
+      day_date = excluded.day_date,
+      pos = excluded.pos
+  `),
+  deleteItemOrder: db.prepare('DELETE FROM item_order WHERE board_id = ? AND item_id = ?'),
+  clearItemOrderForBoard: db.prepare('DELETE FROM item_order WHERE board_id = ?'),
+
+  listDayOrder: db.prepare('SELECT day_date, pos FROM day_order WHERE board_id = ?'),
+  upsertDayOrder: db.prepare(`
+    INSERT INTO day_order (board_id, day_date, pos)
+    VALUES (?, ?, ?)
+    ON CONFLICT(board_id, day_date) DO UPDATE SET pos = excluded.pos
+  `),
+  clearDayOrderForBoard: db.prepare('DELETE FROM day_order WHERE board_id = ?'),
 };
 
 // --- App ---
@@ -257,6 +291,8 @@ app.delete('/api/boards/:id', (c) => {
   stmt.clearBoardSettings.run(id);
   stmt.clearCustomItemsForBoard.run(id);
   stmt.clearOverridesForBoard.run(id);
+  stmt.clearItemOrderForBoard.run(id);
+  stmt.clearDayOrderForBoard.run(id);
   stmt.deleteBoard.run(id);
   return c.json({ ok: true });
 });
@@ -426,7 +462,7 @@ function boardSettingsObj(boardId) {
 }
 
 // ===== Custom items =====
-// List all custom items + overrides for a board (consumed by parser/merger).
+// List all custom items + overrides + user-defined order for a board.
 app.get('/api/boards/:id/extras', (c) => {
   const id = c.req.param('id');
   const custom = stmt.listCustomItems.all(id).map(r => ({
@@ -436,7 +472,59 @@ app.get('/api/boards/:id/extras', (c) => {
   for (const r of stmt.listOverrides.all(id)) {
     overrides[r.item_id] = JSON.parse(r.payload);
   }
-  return c.json({ custom, overrides });
+  const itemOrder = {}; // item_id -> {day_date, pos}
+  for (const r of stmt.listItemOrder.all(id)) {
+    itemOrder[r.item_id] = { day_date: r.day_date, pos: r.pos };
+  }
+  const dayOrder = {}; // day_date -> pos
+  for (const r of stmt.listDayOrder.all(id)) {
+    dayOrder[r.day_date] = r.pos;
+  }
+  return c.json({ custom, overrides, item_order: itemOrder, day_order: dayOrder });
+});
+
+// Reorder cards within a day OR move cards across days.
+// Body: { day_date: "6/19", item_ids: ["id1","id2",...] }
+//   - item_ids is the FULL ordered list for that day after the drop
+//   - server writes per-item user_pos (1024, 2048, 3072, ...) and updates day_date
+app.put('/api/boards/:id/days/:date/order', async (c) => {
+  const boardId = c.req.param('id');
+  const dayDate = c.req.param('date');
+  const body = await c.req.json();
+  if (!body || !Array.isArray(body.item_ids)) {
+    return c.json({ error: 'item_ids required' }, 400);
+  }
+  const tx = db.transaction((ids) => {
+    ids.forEach((itemId, idx) => {
+      if (typeof itemId !== 'string') return;
+      const pos = (idx + 1) * 1024;
+      stmt.upsertItemOrder.run(boardId, itemId, dayDate, pos);
+      // If it's a custom item, also sync its native row so list_extras works
+      const cust = stmt.getCustomItem.get(itemId);
+      if (cust && cust.board_id === boardId) {
+        stmt.updateCustomItem.run(cust.payload, pos, dayDate, Date.now(), itemId);
+      }
+    });
+  });
+  tx(body.item_ids);
+  return c.json({ ok: true });
+});
+
+// Reorder days. Body: { day_dates: ["6/22 米蘭","6/18 維也納",...] }
+app.put('/api/boards/:id/day-order', async (c) => {
+  const boardId = c.req.param('id');
+  const body = await c.req.json();
+  if (!body || !Array.isArray(body.day_dates)) {
+    return c.json({ error: 'day_dates required' }, 400);
+  }
+  const tx = db.transaction((arr) => {
+    arr.forEach((d, idx) => {
+      if (typeof d !== 'string') return;
+      stmt.upsertDayOrder.run(boardId, d, (idx + 1) * 1024);
+    });
+  });
+  tx(body.day_dates);
+  return c.json({ ok: true });
 });
 
 // Create a custom item for a specific day.

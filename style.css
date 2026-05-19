@@ -237,6 +237,89 @@ body.editing-route .tl-card:hover { outline: 1px dashed #d4d2c8; outline-offset:
 .modal-row { display: flex; gap: 12px; }
 .muted { color: #9ca3af; font-size: 12px; }
 
+/* Drag handles */
+.tl-drag-handle {
+  position: absolute;
+  top: 50%;
+  left: -2px;
+  transform: translateY(-50%);
+  color: #d1d5db;
+  font-size: 14px;
+  font-weight: bold;
+  cursor: grab;
+  padding: 6px 4px;
+  user-select: none;
+  letter-spacing: -2px;
+  opacity: 0;
+  transition: opacity .15s, color .15s;
+  z-index: 3;
+}
+.tl-card:hover .tl-drag-handle { opacity: 1; }
+.tl-drag-handle:hover { color: var(--brand); }
+.tl-drag-handle:active { cursor: grabbing; }
+
+.day-drag-handle {
+  display: inline-block;
+  color: rgba(255,255,255,.55);
+  cursor: grab;
+  font-size: 14px;
+  font-weight: bold;
+  padding: 0 8px 0 0;
+  user-select: none;
+  letter-spacing: -2px;
+}
+.day-drag-handle:hover { color: #fff; }
+.day-drag-handle:active { cursor: grabbing; }
+
+/* SortableJS visual states */
+.sortable-ghost { opacity: 0.3; }
+.sortable-chosen { box-shadow: 0 4px 16px rgba(45,90,78,.3); }
+
+/* Map place list */
+.day-map-list {
+  padding: 8px 14px;
+  background: #fafaf7;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.day-map-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 4px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 12.5px;
+  color: #374151;
+  transition: background .15s, border-color .15s, color .15s;
+  max-width: 280px;
+}
+.day-map-chip:hover { background: var(--brand); color: #fff; border-color: var(--brand); }
+.day-map-chip:hover .day-map-chip-num { background: #fff; color: var(--brand); }
+.day-map-chip.off { opacity: 0.4; cursor: not-allowed; }
+.day-map-chip-num {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--brand);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.day-map-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Toolbar edit-route button active state */
 #edit-route-toggle.active { background: var(--brand); color: #fff; }
 

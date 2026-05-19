@@ -116,6 +116,18 @@ export async function geocode(q) {
   return await api(path);
 }
 
+// ---------- Reorder ----------
+export async function saveDayOrder(boardId, dayDates) {
+  await api(`/api/boards/${encodeURIComponent(boardId)}/day-order`, {
+    method: 'PUT', body: JSON.stringify({ day_dates: dayDates }),
+  });
+}
+export async function saveItemOrder(boardId, dayDate, itemIds) {
+  await api(`/api/boards/${encodeURIComponent(boardId)}/days/${encodeURIComponent(dayDate)}/order`, {
+    method: 'PUT', body: JSON.stringify({ item_ids: itemIds }),
+  });
+}
+
 // ---------- boards ----------
 export async function listBoards() {
   const { boards } = await api('/api/boards');
