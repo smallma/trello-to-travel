@@ -1,7 +1,12 @@
 // parser.js
 // Pure function: parse Trello export JSON into {trip, days, extras, warnings}
 
-const DATE_RE = /^(\d{1,2})\/(\d{1,2})/;
+// Match a M/D date anywhere in the list name. Supports formats like:
+//   "6/18 (四) 維也納"            -> 6/18
+//   "Day 1 - 1/23 (六)"           -> 1/23
+//   "Day 8- 1/30 (六)"            -> 1/30
+//   "2027/1/23 高松"              -> 1/23  (year prefix tolerated)
+const DATE_RE = /(?:^|[^\d])(\d{1,2})\/(\d{1,2})(?!\d)/;
 // Match time like "12:30", "18:30 ~ 21:00", "08:15-10:00"
 const TIME_RE = /\b(\d{1,2}:\d{2})\s*(?:[~\-–到至]\s*(\d{1,2}:\d{2}))?/;
 const URL_RE = /https?:\/\/[^\s<>"'\)\]]+/g;
