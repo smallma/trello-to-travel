@@ -208,27 +208,49 @@ export async function generateGuide(item, city, preference) {
  */
 function cleanGuideText(raw) {
   if (!raw) return '';
-  let text = raw
+  let text = raw;
+
+  // Strategy 1: split on </think> — MiniMax always closes thinking here, even
+  // if the opening <think> tag was overwritten by an emoji header.
+  const thinkClose = text.lastIndexOf('</think>');
+  if (thinkClose >= 0) {
+    text = text.slice(thinkClose + '</think>'.length);
+  }
+
+  // Strategy 2: drop any remaining <think>...</think> or unterminated <think>
+  text = text
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<think>[\s\S]*$/i, '')
     .replace(/^```(?:markdown|md|text)?\s*/i, '')
     .replace(/```\s*$/i, '')
     .trim();
 
-  // Find the first emoji-headed section. Our template starts with one of
-  // 📜 👀 ⚠️ 💡 🍽️ 🏨 🚆 🛍️ 🎫 📍 🌟 — slice from there onward.
-  const sectionStart = text.search(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u);
-  if (sectionStart > 0) {
-    // If the first ~60 chars before the emoji contain reasoning keywords, drop them.
-    const head = text.slice(0, sectionStart);
-    const reasoning = /用户|讓我|让我|我需要|首先|好的|以下是|我对|对这个/.test(head);
-    if (reasoning || sectionStart > 100) {
-      text = text.slice(sectionStart).trim();
-    }
+  // Strategy 3: find the LAST run of Chinese content. The actual answer is
+  // always Chinese (we prompt for 繁體中文). Drop any English-only preamble.
+  // We look for the first line that contains a CJK character AND starts with
+  // an emoji header (📜 👀 ⚠️ 💡 🍽️ 🏨 🚆 🛍️ 🎫).
+  const lines = text.split('\n');
+  let startIdx = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    const hasEmoji = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(line);
+    const hasCJK = /[一-鿿]/.test(line);
+    if (hasEmoji && hasCJK) { startIdx = i; break; }
   }
+  if (startIdx > 0) text = lines.slice(startIdx).join('\n');
 
-  // Remove any stray "用户要求" / "我需要組織" lines that slipped past
+  // Strategy 4: drop residual meta-reasoning lines
   text = text
     .split('\n')
-    .filter(line => !/^(用户要求|让我|讓我|我需要|首先|好的，|以下是我|我对|对这个|這座|建于)/.test(line.trim()))
+    .filter(line => {
+      const t = line.trim();
+      if (!t) return true;
+      // Lines that are pure English meta-talk
+      if (/^(I need|Let me|First|Note:|Now|Make sure|Ensure|Use Traditional|No markdown|No JSON)/i.test(t)) return false;
+      // Lines starting with Chinese meta-talk
+      if (/^(用户要求|用戶要求|让我|讓我|我需要|首先|好的[，,]|以下是我|我对|對這個|对这个|這座|建于|建於)/.test(t)) return false;
+      return true;
+    })
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
