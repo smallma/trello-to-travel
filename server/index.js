@@ -591,7 +591,9 @@ function sanitizeItemPayload(input) {
 }
 
 // ===== Geocode proxy =====
-// Look up a place query and return cached/fresh lat/lng. Uses Nominatim.
+// Cache → Nominatim → (on 429/error) Photon. All Nominatim calls serialized
+// through a queue so we never violate the 1-req/s policy even under parallel
+// browser fetches.
 app.get('/api/geocode', async (c) => {
   const q = (c.req.query('q') || '').trim();
   if (!q) return c.json({ error: 'q required' }, 400);
@@ -599,33 +601,70 @@ app.get('/api/geocode', async (c) => {
   if (cached) {
     return c.json({ q, lat: cached.lat, lng: cached.lng, display: cached.display, source: 'cache' });
   }
-  await rateLimitNominatim();
   try {
-    const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`;
-    const res = await fetch(url, {
-      headers: { 'User-Agent': 'trello-to-travel/1.0 (private use)' },
-    });
-    if (!res.ok) return c.json({ error: 'nominatim ' + res.status }, 502);
-    const arr = await res.json();
-    if (!Array.isArray(arr) || arr.length === 0) {
-      return c.json({ q, lat: null, lng: null, source: 'miss' });
-    }
-    const lat = parseFloat(arr[0].lat);
-    const lng = parseFloat(arr[0].lon);
-    const display = arr[0].display_name || '';
-    stmt.setGeo.run(q, lat, lng, display, Date.now());
-    return c.json({ q, lat, lng, display, source: 'nominatim' });
+    const hit = await geocodeOnce(q);
+    if (!hit) return c.json({ q, lat: null, lng: null, source: 'miss' });
+    stmt.setGeo.run(q, hit.lat, hit.lng, hit.display || '', Date.now());
+    return c.json({ q, lat: hit.lat, lng: hit.lng, display: hit.display, source: hit.source });
   } catch (e) {
     return c.json({ error: e.message }, 502);
   }
 });
 
-let _lastNominatim = 0;
-async function rateLimitNominatim() {
-  const now = Date.now();
-  const wait = Math.max(0, _lastNominatim + 1100 - now);
-  if (wait > 0) await new Promise(r => setTimeout(r, wait));
-  _lastNominatim = Date.now();
+// --- Single-flight queue for Nominatim (1.2s gap between calls) ---
+let _nominatimChain = Promise.resolve();
+function queueNominatim(fn) {
+  const next = _nominatimChain.then(async () => {
+    const result = await fn();
+    await new Promise(r => setTimeout(r, 1200));
+    return result;
+  });
+  // Swallow rejection in the chain so one failure doesn't break the line
+  _nominatimChain = next.catch(() => {});
+  return next;
+}
+
+async function geocodeOnce(q) {
+  // Try Nominatim first (better quality), Photon as backup
+  try {
+    const hit = await queueNominatim(() => fetchNominatim(q));
+    if (hit) return hit;
+  } catch (e) {
+    console.warn(`[geocode] nominatim failed for "${q}": ${e.message}, trying photon`);
+  }
+  return await fetchPhoton(q);
+}
+
+async function fetchNominatim(q) {
+  const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`;
+  const res = await fetch(url, {
+    headers: { 'User-Agent': 'trello-to-travel/1.0 (private use; rainlin009@gmail.com)' },
+  });
+  if (res.status === 429) throw new Error('nominatim 429');
+  if (!res.ok) throw new Error('nominatim ' + res.status);
+  const arr = await res.json();
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+  return {
+    lat: parseFloat(arr[0].lat),
+    lng: parseFloat(arr[0].lon),
+    display: arr[0].display_name || '',
+    source: 'nominatim',
+  };
+}
+
+async function fetchPhoton(q) {
+  const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=1`;
+  const res = await fetch(url);
+  if (!res.ok) return null;
+  const j = await res.json();
+  const f = j?.features?.[0];
+  if (!f?.geometry?.coordinates) return null;
+  const [lng, lat] = f.geometry.coordinates;
+  return {
+    lat, lng,
+    display: f.properties?.name || '',
+    source: 'photon',
+  };
 }
 
 // Setting: active board id (so the same user gets the same board on any device)
