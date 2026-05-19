@@ -354,7 +354,6 @@ function buildQaSection(item, day) {
       loaded = true;
     } catch {}
   };
-  card.dataset && card.addEventListener && card.addEventListener('cardExpanded', loadList);
 
   const ask = async (useSearch) => {
     const q = input.value.trim();
