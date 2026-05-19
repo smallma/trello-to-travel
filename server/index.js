@@ -707,9 +707,10 @@ function toAttachmentDTO(row) {
 // List all custom items + overrides + user-defined order for a board.
 app.get('/api/boards/:id/extras', (c) => {
   const id = c.req.param('id');
-  const custom = stmt.listCustomItems.all(id).map(r => ({
-    id: r.id, day_date: r.day_date, pos: r.pos, ...JSON.parse(r.payload),
-  }));
+  // Skip drafts so they never show up in the timeline
+  const custom = stmt.listCustomItems.all(id)
+    .map(r => ({ id: r.id, day_date: r.day_date, pos: r.pos, ...JSON.parse(r.payload) }))
+    .filter(it => it.title !== DRAFT_TITLE);
   const overrides = {};
   for (const r of stmt.listOverrides.all(id)) {
     overrides[r.item_id] = JSON.parse(r.payload);
@@ -767,6 +768,23 @@ app.put('/api/boards/:id/day-order', async (c) => {
   });
   tx(body.day_dates);
   return c.json({ ok: true });
+});
+
+// Create an empty draft item for the day. Used when the user clicks "+ 新增"
+// so they can upload attachments before filling in the form. The draft is
+// invisible in the UI (filtered by its DRAFT marker title) until the user
+// hits Save (which calls PUT /items/:itemId to finalize).
+const DRAFT_TITLE = '__DRAFT__';
+
+app.post('/api/boards/:id/days/:date/draft', (c) => {
+  const boardId = c.req.param('id');
+  const dayDate = c.req.param('date');
+  const id = 'cust_' + randomBytes(10).toString('hex');
+  const maxRow = stmt.maxPosForDay.get(boardId, dayDate);
+  const pos = (maxRow?.m || 0) + 1024;
+  const now = Date.now();
+  stmt.insertCustomItem.run(id, boardId, dayDate, JSON.stringify({ title: DRAFT_TITLE, _draft: true }), pos, now, now);
+  return c.json({ ok: true, id });
 });
 
 // Create a custom item for a specific day.

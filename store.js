@@ -100,6 +100,11 @@ export async function createCustomItem(boardId, dayDate, payload) {
     body: JSON.stringify(payload),
   });
 }
+export async function createDraft(boardId, dayDate) {
+  return await api(`/api/boards/${encodeURIComponent(boardId)}/days/${encodeURIComponent(dayDate)}/draft`, {
+    method: 'POST',
+  });
+}
 export async function updateItem(boardId, itemId, payload) {
   return await api(`/api/boards/${encodeURIComponent(boardId)}/items/${encodeURIComponent(itemId)}`, {
     method: 'PUT',

@@ -494,7 +494,9 @@ document.getElementById('settings-modal').addEventListener('click', (e) => {
 window.__openSettings = openSettings;
 
 // ---------- Item editor modal ----------
-function openItemEditor({ mode, item, day }) {
+let _currentDraftId = null;   // tracks the draft created for an in-progress add
+
+async function openItemEditor({ mode, item, day }) {
   const modal = document.getElementById('item-modal');
   modal.classList.remove('hidden');
   const f = modal.querySelector('#it-form');
@@ -508,7 +510,25 @@ function openItemEditor({ mode, item, day }) {
 
   h.textContent = mode === 'add' ? `+ 新增行程（${day?.list_name || ''}）` : '✏️ 編輯行程';
 
-  const it = mode === 'edit' ? item : { title: '', desc: '', category: { type: 'other', emoji: '📌', label: '行程' }};
+  // In add mode, create a draft on the server so attachments can be uploaded
+  // BEFORE the user fills in the form. The draft is invisible in the UI;
+  // saving "promotes" it; closing without save deletes it.
+  let workingItem = item;
+  if (mode === 'add') {
+    try {
+      const r = await store.createDraft(activeBoardId, day.date);
+      _currentDraftId = r.id;
+      workingItem = { id: r.id, title: '', desc: '', category: { type: 'other', emoji: '📌', label: '行程' }};
+    } catch (e) {
+      _currentDraftId = null;
+      workingItem = { title: '', desc: '', category: { type: 'other', emoji: '📌', label: '行程' }};
+      status.textContent = '⚠ 建立草稿失敗，附件功能停用：' + e.message;
+    }
+  } else {
+    _currentDraftId = null;
+  }
+
+  const it = workingItem;
   f.querySelector('#it-fld-title').value = it.title || '';
   f.querySelector('#it-fld-desc').value = it.desc || '';
   f.querySelector('#it-fld-place').value = it.place || '';
@@ -520,8 +540,8 @@ function openItemEditor({ mode, item, day }) {
   status.textContent = '';
   title.textContent = it.title ? `（編輯：${it.title}）` : '';
 
-  // Attachments: only available for existing items (need an id)
-  const itemId = mode === 'edit' ? item.id : null;
+  // Attachments: works for both edit (existing item) and add (just-created draft)
+  const itemId = it.id || null;
   attList.innerHTML = '';
   if (itemId) {
     const refreshAttList = () => {
@@ -608,20 +628,13 @@ function openItemEditor({ mode, item, day }) {
       category: makeCategory(f.querySelector('#it-fld-category').value),
       links: f.querySelector('#it-fld-links').value.split('\n').map(s => s.trim()).filter(Boolean),
     };
-    const img = f.querySelector('#it-fld-image').value.trim();
-    if (img) payload.images = [{ thumb: img, full: img, name: '' }];
-
-    if (!payload.title) {
-      status.textContent = '請輸入標題';
-      return;
-    }
+    if (!payload.title) { status.textContent = '請輸入標題'; return; }
     status.textContent = '儲存中…';
     try {
-      if (mode === 'add') {
-        await store.createCustomItem(activeBoardId, day.date, payload);
-      } else {
-        await store.updateItem(activeBoardId, item.id, payload);
-      }
+      const targetId = mode === 'add' ? _currentDraftId : item.id;
+      if (!targetId) throw new Error('沒有目標 ID');
+      await store.updateItem(activeBoardId, targetId, payload);
+      _currentDraftId = null;   // promoted; no longer a draft to clean up
       modal.classList.add('hidden');
       await loadActiveBoard();
     } catch (e) {
@@ -629,11 +642,30 @@ function openItemEditor({ mode, item, day }) {
     }
   };
 
-  modal.querySelector('#it-close').onclick = () => modal.classList.add('hidden');
+  const discardDraftAndClose = async () => {
+    // If there's an unsaved draft, ask before throwing away (incl. attachments)
+    if (_currentDraftId) {
+      const draftAtts = attachmentsByItem.get(_currentDraftId) || [];
+      const draftId = _currentDraftId;
+      const hasContent = (f.querySelector('#it-fld-title').value.trim() || draftAtts.length > 0);
+      if (hasContent && !confirm(`未儲存的卡片會被刪除${draftAtts.length ? `（含 ${draftAtts.length} 個已上傳附件）` : ''}，確定取消？`)) {
+        return;
+      }
+      _currentDraftId = null;
+      try { await store.deleteItem(activeBoardId, draftId); } catch {}
+    }
+    modal.classList.add('hidden');
+    // Refresh in case there were attachment uploads to a real card that got cancelled
+    if (mode === 'edit') await loadActiveBoard();
+  };
+  modal.querySelector('#it-close').onclick = discardDraftAndClose;
 }
 
 document.getElementById('item-modal').addEventListener('click', (e) => {
-  if (e.target.id === 'item-modal') e.target.classList.add('hidden');
+  if (e.target.id === 'item-modal') {
+    // Route through close button so draft cleanup runs
+    document.getElementById('it-close').click();
+  }
 });
 
 const CATEGORY_DEFS = {

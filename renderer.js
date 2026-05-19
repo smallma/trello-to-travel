@@ -357,10 +357,16 @@ function buildQaSection(item, day) {
 
   const ask = async (useSearch) => {
     const q = input.value.trim();
-    if (!q) return;
+    if (!q) {
+      input.focus();
+      input.placeholder = '請先輸入問題再點按鈕';
+      setTimeout(() => { input.placeholder = '問這個景點任何問題…'; }, 1500);
+      return;
+    }
     input.disabled = true;
+    qa.querySelectorAll('.tl-qa-ask').forEach(b => b.disabled = true);
     const tmp = el('div', 'tl-qa-row');
-    tmp.innerHTML = `<div class="tl-qa-q"><strong>Q:</strong> ${escape(q)}</div><div class="tl-qa-a"><em class="muted">⏳ AI 思考中…</em></div>`;
+    tmp.innerHTML = `<div class="tl-qa-q"><strong>Q:</strong> ${escape(q)} ${useSearch ? '<span class="tl-qa-source">🌐 搜尋中…</span>' : ''}</div><div class="tl-qa-a"><em class="muted">⏳ AI 思考中（最多 60 秒）…</em></div>`;
     list.insertBefore(tmp, list.firstChild);
     try {
       const daySummary = day ? day.items.map(it => {
@@ -381,6 +387,16 @@ function buildQaSection(item, day) {
       tmp.querySelector('.tl-qa-a').innerHTML = `<em class="muted" style="color:#dc2626">⚠️ ${escape(e.message)}</em>`;
     } finally {
       input.disabled = false;
+      qa.querySelectorAll('.tl-qa-ask').forEach(b => {
+        // restore disabled state — search button stays disabled if feature off
+        const features = getFeaturesCb();
+        if (b.classList.contains('tl-qa-ask-search') && !features.search) {
+          b.disabled = true;
+        } else {
+          b.disabled = false;
+        }
+      });
+      input.focus();
     }
   };
 
