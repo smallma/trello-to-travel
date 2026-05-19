@@ -378,6 +378,43 @@ body.editing-route .tl-card:hover { outline: 1px dashed #d4d2c8; outline-offset:
 .upload-import { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border: 1px solid var(--brand); color: var(--brand); border-radius: 5px; font-size: 13px; cursor: pointer; background: #fff; transition: background .15s, color .15s; }
 .upload-import:hover { background: var(--brand); color: #fff; }
 
+/* Map-number badge on each card */
+.tl-map-num {
+  position: absolute;
+  top: -8px;
+  left: -10px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--brand);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11.5px;
+  font-weight: 700;
+  box-shadow: 0 1px 3px rgba(0,0,0,.2);
+  z-index: 2;
+}
+.tl-map-num.off { background: #9ca3af; }
+
+/* Top progress bar */
+#top-progress { position: fixed; top: 0; left: 0; right: 0; height: 3px; background: linear-gradient(90deg, var(--brand), var(--accent), var(--brand)); background-size: 200% 100%; z-index: 9999; animation: top-progress-slide 1.2s linear infinite; }
+#top-progress.hidden { display: none; }
+@keyframes top-progress-slide { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+
+/* Loading overlay */
+#loading-overlay { position: fixed; inset: 0; background: rgba(255,255,255,.75); backdrop-filter: blur(2px); display: flex; align-items: center; justify-content: center; z-index: 9998; }
+#loading-overlay.hidden { display: none; }
+.loading-box { background: #fff; border-radius: 12px; padding: 24px 32px; box-shadow: 0 8px 32px rgba(0,0,0,.15); display: flex; flex-direction: column; align-items: center; gap: 12px; min-width: 200px; }
+.loading-spinner { width: 36px; height: 36px; border: 3px solid #e5e7eb; border-top-color: var(--brand); border-radius: 50%; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-msg { font-size: 14px; color: var(--brand); font-weight: 500; }
+
+/* Inline button spinner */
+.btn-loading { position: relative; color: transparent !important; pointer-events: none; }
+.btn-loading::after { content: ''; position: absolute; top: 50%; left: 50%; width: 14px; height: 14px; margin: -7px 0 0 -7px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin .6s linear infinite; color: var(--brand); }
+
 /* Toolbar edit-route button active state */
 #edit-route-toggle.active { background: var(--brand); color: #fff; }
 

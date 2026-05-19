@@ -160,13 +160,18 @@ function renderDay(day) {
   }
 
   const timeline = el('div', 'timeline');
+  const rowsByItemId = new Map();
   for (const item of day.items) {
-    timeline.appendChild(renderTimelineRow(item, day));
+    const row = renderTimelineRow(item, day);
+    rowsByItemId.set(item.id, row);
+    timeline.appendChild(row);
   }
   if (day.items.length === 0) {
     timeline.appendChild(el('div', 'timeline-empty', '（這天還沒有安排）'));
   }
   body.appendChild(timeline);
+  // Store on block so renderDayMap can update card numbers later
+  block._rowsByItemId = rowsByItemId;
 
   // Map area (async; loading state handled inside)
   const mapWrap = el('div', 'day-map');
@@ -257,9 +262,29 @@ export async function renderDayMap(wrap, day, { refresh = false } = {}) {
     if (!c) return;
     validCoords.push(c);
     const marker = L.marker([c.lat, c.lng], { icon: numberedIcon(i + 1) }).addTo(map);
-    marker.bindPopup(`<strong>${i + 1}.</strong> ${escape(c.label)}`);
+    const popupTitle = waypoints[i].title || c.label;
+    marker.bindPopup(`<strong>${i + 1}. ${escape(popupTitle)}</strong><div style="color:#6b7280;font-size:12px;margin-top:2px">📍 ${escape(c.label)}</div>`);
     markers[i] = marker;
   });
+
+  // Inject map number badges into the matching cards in the timeline
+  const dayBlock = wrap.closest('.day-block');
+  const rowsByItemId = dayBlock?._rowsByItemId;
+  if (rowsByItemId) {
+    // First, clear any old badges (re-renders)
+    dayBlock.querySelectorAll('.tl-map-num').forEach(n => n.remove());
+    waypoints.forEach((wp, i) => {
+      const row = rowsByItemId.get(wp.id);
+      if (!row) return;
+      const card = row.querySelector('.tl-card');
+      if (!card) return;
+      const badge = document.createElement('span');
+      badge.className = 'tl-map-num' + (coords[i] ? '' : ' off');
+      badge.textContent = i + 1;
+      badge.title = coords[i] ? `對應地圖標記 ${i + 1}` : '無法定位';
+      card.appendChild(badge);
+    });
+  }
 
   if (validCoords.length === 0) {
     mapDiv.style.display = 'none';
@@ -278,16 +303,17 @@ export async function renderDayMap(wrap, day, { refresh = false } = {}) {
   // Build clickable list
   coords.forEach((c, i) => {
     const chip = el('button', 'day-map-chip' + (c ? '' : ' off'));
-    chip.innerHTML = `<span class="day-map-chip-num">${i + 1}</span><span class="day-map-chip-label">${escape(waypoints[i].q)}</span>`;
+    const title = waypoints[i].title || waypoints[i].q;
+    chip.innerHTML = `<span class="day-map-chip-num">${i + 1}</span><span class="day-map-chip-label" title="${escape(waypoints[i].q)}">${escape(title)}</span>`;
     if (c && markers[i]) {
-      chip.title = '點擊放大此地點';
+      chip.title = `點擊地圖跳到「${title}」`;
       chip.addEventListener('click', () => {
         map.flyTo([c.lat, c.lng], 16, { duration: 0.6 });
         markers[i].openPopup();
         mapDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       });
     } else {
-      chip.title = '無法定位';
+      chip.title = '無法定位（地名查不到）';
       chip.disabled = true;
     }
     listWrap.appendChild(chip);

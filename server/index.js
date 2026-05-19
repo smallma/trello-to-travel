@@ -437,13 +437,21 @@ app.post('/api/boards/:id/places/:date', async (c) => {
   }
 
   if (!places || places.length === 0) {
-    // Fallback: return items as-is so the client uses its regex-based extractor
     source = 'fallback';
     places = items.map(it => ({ id: it.id, q: (it.place || it.title || '').trim() })).filter(x => x.q);
   }
 
-  stmt.setPlaceCache.run(boardId, dayDate, hash, JSON.stringify(places), source, Date.now());
-  return c.json({ source, places });
+  // Enrich each place with its card title (and city) so the UI can show a
+  // human-readable label next to the map number.
+  const titleById = new Map(items.map(it => [it.id, it.title || '']));
+  const enriched = places.map(p => ({
+    id: p.id,
+    q: p.q,
+    title: titleById.get(p.id) || p.q,
+  }));
+
+  stmt.setPlaceCache.run(boardId, dayDate, hash, JSON.stringify(enriched), source, Date.now());
+  return c.json({ source, places: enriched });
 });
 
 // AI guide for a single item. Lazy-loaded: called when user expands the card.

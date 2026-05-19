@@ -46,10 +46,12 @@ setRouteHandlers({
   onDeleteItem: async (itemId) => {
     if (!activeBoardId) return;
     if (!confirm('刪除這張自訂卡片？無法復原。')) return;
-    try {
-      await store.deleteItem(activeBoardId, itemId);
-      await loadActiveBoard();
-    } catch (e) { showError('刪除失敗：' + e.message); }
+    await withLoading('刪除中…', async () => {
+      try {
+        await store.deleteItem(activeBoardId, itemId);
+        await loadActiveBoard();
+      } catch (e) { showError('刪除失敗：' + e.message); }
+    });
   },
   onEditItem: (item, day) => openItemEditor({ mode: 'edit', item, day }),
   onAddItem: (day) => openItemEditor({ mode: 'add', day }),
@@ -119,22 +121,24 @@ fileInput.addEventListener('change', async (e) => {
   if (!file.name.toLowerCase().endsWith('.json') && file.type !== 'application/json') {
     return showError('請上傳合法的 JSON 檔（副檔名 .json）');
   }
-  try {
-    const text = await file.text();
-    let raw;
-    try { raw = JSON.parse(text); } catch (err) { return showError('JSON 格式錯誤：' + err.message); }
-    parseTrello(raw); // validate
-    const board = await store.addBoard(raw);
-    activeBoardId = board.id;
-    await store.setActiveId(board.id);
-    await refreshSidebar();
-    await loadActiveBoard();
-    showToast('已匯入：' + board.name);
-  } catch (err) {
-    showError(err.message || '上傳失敗');
-  } finally {
-    fileInput.value = '';
-  }
+  await withLoading('讀取並匯入「' + file.name + '」…', async () => {
+    try {
+      const text = await file.text();
+      let raw;
+      try { raw = JSON.parse(text); } catch (err) { return showError('JSON 格式錯誤：' + err.message); }
+      parseTrello(raw);
+      const board = await store.addBoard(raw);
+      activeBoardId = board.id;
+      await store.setActiveId(board.id);
+      await refreshSidebar();
+      await loadActiveBoard();
+      showToast('已匯入：' + board.name);
+    } catch (err) {
+      showError(err.message || '上傳失敗');
+    } finally {
+      fileInput.value = '';
+    }
+  });
 });
 
 // ---------- Sidebar ----------
@@ -160,11 +164,21 @@ async function refreshSidebar() {
     li.innerHTML = `<span class="board-item-name" title="${escapeAttr(b.name)}">${escapeHtml(b.name)}</span>`;
     li.addEventListener('click', async (e) => {
       if (e.target.closest('.board-item-actions')) return;
+      if (b.id === activeBoardId) return;
+      _currentDraftId = null;
+      document.getElementById('item-modal')?.classList.add('hidden');
+      document.getElementById('settings-modal')?.classList.add('hidden');
       activeBoardId = b.id;
-      await store.setActiveId(b.id);
-      await refreshSidebar();
-      await loadActiveBoard();
       sidebar.classList.remove('open');
+      await withLoading('切換到「' + b.name + '」…', async () => {
+        try {
+          await store.setActiveId(b.id);
+          await refreshSidebar();
+          await loadActiveBoard();
+        } catch (err) {
+          showError('載入失敗：' + err.message);
+        }
+      });
     });
     const actions = document.createElement('div');
     actions.className = 'board-item-actions';
@@ -186,17 +200,19 @@ async function refreshSidebar() {
     del.addEventListener('click', async (e) => {
       e.stopPropagation();
       if (!confirm(`刪除「${b.name}」？此操作無法復原。`)) return;
-      try {
-        await store.deleteBoard(b.id);
-        if (activeBoardId === b.id) {
-          activeBoardId = null;
-          await store.setActiveId('');
+      await withLoading('刪除中…', async () => {
+        try {
+          await store.deleteBoard(b.id);
+          if (activeBoardId === b.id) {
+            activeBoardId = null;
+            await store.setActiveId('');
+          }
+          await refreshSidebar();
+          await loadActiveBoard();
+        } catch (err) {
+          showError('刪除失敗：' + err.message);
         }
-        await refreshSidebar();
-        await loadActiveBoard();
-      } catch (err) {
-        showError('刪除失敗：' + err.message);
-      }
+      });
     });
     actions.appendChild(del);
     li.appendChild(actions);
@@ -454,20 +470,22 @@ async function openSettings(boardId, boardName) {
     hiddenList.innerHTML = `<em style="color:#dc2626">${escapeHtml(e.message)}</em>`;
   }
 
-  modal.querySelector('#st-save').onclick = async () => {
-    status.textContent = '儲存中…';
-    try {
-      await store.saveBoardSettings(boardId, {
-        name: nameInput.value.trim() || boardName,
-        settings: { preference: prefInput.value.trim() },
-      });
-      status.textContent = '✓ 已儲存';
-      // refresh sidebar in case name changed
-      await refreshSidebar();
-      if (boardId === activeBoardId) await loadActiveBoard();
-    } catch (e) {
-      status.textContent = '錯誤：' + e.message;
-    }
+  const saveSettingsBtn = modal.querySelector('#st-save');
+  saveSettingsBtn.onclick = async () => {
+    await withBtnLoading(saveSettingsBtn, async () => {
+      status.textContent = '';
+      try {
+        await store.saveBoardSettings(boardId, {
+          name: nameInput.value.trim() || boardName,
+          settings: { preference: prefInput.value.trim() },
+        });
+        status.textContent = '✓ 已儲存';
+        await refreshSidebar();
+        if (boardId === activeBoardId) await withLoading('套用變更…', () => loadActiveBoard());
+      } catch (e) {
+        status.textContent = '錯誤：' + e.message;
+      }
+    });
   };
 
   modal.querySelector('#st-clear-cache').onclick = async () => {
@@ -510,11 +528,9 @@ async function openItemEditor({ mode, item, day }) {
 
   h.textContent = mode === 'add' ? `+ 新增行程（${day?.list_name || ''}）` : '✏️ 編輯行程';
 
-  // In add mode, create a draft on the server so attachments can be uploaded
-  // BEFORE the user fills in the form. The draft is invisible in the UI;
-  // saving "promotes" it; closing without save deletes it.
   let workingItem = item;
   if (mode === 'add') {
+    showProgress();
     try {
       const r = await store.createDraft(activeBoardId, day.date);
       _currentDraftId = r.id;
@@ -523,6 +539,8 @@ async function openItemEditor({ mode, item, day }) {
       _currentDraftId = null;
       workingItem = { title: '', desc: '', category: { type: 'other', emoji: '📌', label: '行程' }};
       status.textContent = '⚠ 建立草稿失敗，附件功能停用：' + e.message;
+    } finally {
+      hideProgress();
     }
   } else {
     _currentDraftId = null;
@@ -618,7 +636,8 @@ async function openItemEditor({ mode, item, day }) {
   // Restore dropzone visibility when re-opening for edit
   if (itemId) dz.style.display = '';
 
-  modal.querySelector('#it-save').onclick = async () => {
+  const saveBtn = modal.querySelector('#it-save');
+  saveBtn.onclick = async () => {
     const payload = {
       title: f.querySelector('#it-fld-title').value.trim(),
       desc: f.querySelector('#it-fld-desc').value.trim(),
@@ -629,17 +648,19 @@ async function openItemEditor({ mode, item, day }) {
       links: f.querySelector('#it-fld-links').value.split('\n').map(s => s.trim()).filter(Boolean),
     };
     if (!payload.title) { status.textContent = '請輸入標題'; return; }
-    status.textContent = '儲存中…';
-    try {
-      const targetId = mode === 'add' ? _currentDraftId : item.id;
-      if (!targetId) throw new Error('沒有目標 ID');
-      await store.updateItem(activeBoardId, targetId, payload);
-      _currentDraftId = null;   // promoted; no longer a draft to clean up
-      modal.classList.add('hidden');
-      await loadActiveBoard();
-    } catch (e) {
-      status.textContent = '錯誤：' + e.message;
-    }
+    status.textContent = '';
+    await withBtnLoading(saveBtn, async () => {
+      try {
+        const targetId = mode === 'add' ? _currentDraftId : item.id;
+        if (!targetId) throw new Error('沒有目標 ID');
+        await store.updateItem(activeBoardId, targetId, payload);
+        _currentDraftId = null;
+        modal.classList.add('hidden');
+        await withLoading('更新中…', () => loadActiveBoard());
+      } catch (e) {
+        status.textContent = '錯誤：' + e.message;
+      }
+    });
   };
 
   const discardDraftAndClose = async () => {
@@ -701,6 +722,27 @@ async function copyToClipboard(text) {
   } catch { return false; }
 }
 
+// ---------- Global loading helpers ----------
+const _progress = document.getElementById('top-progress');
+const _overlay = document.getElementById('loading-overlay');
+const _overlayMsg = document.getElementById('loading-msg');
+let _progressDepth = 0;
+let _overlayDepth = 0;
+function showProgress() { _progressDepth++; _progress.classList.remove('hidden'); }
+function hideProgress() { _progressDepth = Math.max(0, _progressDepth - 1); if (_progressDepth === 0) _progress.classList.add('hidden'); }
+function showLoading(msg = '載入中…') { _overlayDepth++; _overlayMsg.textContent = msg; _overlay.classList.remove('hidden'); }
+function hideLoading() { _overlayDepth = Math.max(0, _overlayDepth - 1); if (_overlayDepth === 0) _overlay.classList.add('hidden'); }
+async function withProgress(fn) { showProgress(); try { return await fn(); } finally { hideProgress(); } }
+async function withLoading(msg, fn) { showLoading(msg); try { return await fn(); } finally { hideLoading(); } }
+async function withBtnLoading(btn, fn) {
+  if (!btn) return await fn();
+  const prevDisabled = btn.disabled;
+  btn.disabled = true;
+  btn.classList.add('btn-loading');
+  try { return await fn(); }
+  finally { btn.classList.remove('btn-loading'); btn.disabled = prevDisabled; }
+}
+
 function showError(msg) { banner.className = 'banner err'; banner.textContent = '⚠ ' + msg; }
 function showWarning(msg) { banner.className = 'banner warn'; banner.textContent = '⚠ ' + msg; }
 function hideBanner() { banner.className = 'banner hidden'; banner.textContent = ''; }
@@ -728,6 +770,7 @@ const exportBtn = document.getElementById('export-board');
 if (exportBtn) {
   exportBtn.addEventListener('click', () => {
     if (!activeBoardId) return showToast('沒有開啟的行程');
+    showToast('準備下載 ZIP…');
     window.location.href = store.exportBoardUrl(activeBoardId);
   });
 }
@@ -736,19 +779,20 @@ if (importInput) {
   importInput.addEventListener('change', async () => {
     const file = importInput.files[0];
     if (!file) return;
-    showToast('匯入中…');
-    try {
-      const res = await store.importBoard(file);
-      showToast('已匯入：' + res.name);
-      activeBoardId = res.id;
-      await store.setActiveId(res.id);
-      await refreshSidebar();
-      await loadActiveBoard();
-    } catch (e) {
-      showError('匯入失敗：' + e.message);
-    } finally {
-      importInput.value = '';
-    }
+    await withLoading('匯入「' + file.name + '」… (' + fmtBytes(file.size) + ')', async () => {
+      try {
+        const res = await store.importBoard(file);
+        showToast('已匯入：' + res.name);
+        activeBoardId = res.id;
+        await store.setActiveId(res.id);
+        await refreshSidebar();
+        await loadActiveBoard();
+      } catch (e) {
+        showError('匯入失敗：' + e.message);
+      } finally {
+        importInput.value = '';
+      }
+    });
   });
 }
 
