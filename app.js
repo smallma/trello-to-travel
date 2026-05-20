@@ -94,6 +94,19 @@ setRouteHandlers({
   askQa: (itemId, payload) => store.askQa(activeBoardId, itemId, payload),
   deleteQa: (id) => store.deleteQa(id),
   getFeatures: () => serverFeatures,
+  onAddDay: async (afterDate) => {
+    if (!activeBoardId) return;
+    const placeholder = afterDate ? '例：6/19 維也納' : '例：6/18 維也納';
+    const listName = prompt('新增日（請輸入「M/D 標題」格式）', placeholder);
+    if (!listName) return;
+    await withLoading('新增日中…', async () => {
+      try {
+        await store.addDay(activeBoardId, listName.trim(), afterDate);
+        await loadActiveBoard();
+        showToast('已新增：' + listName);
+      } catch (e) { showError('新增日失敗：' + e.message); }
+    });
+  },
 });
 
 // ---------- Password gate ----------
@@ -399,6 +412,38 @@ document.getElementById('copy-json').addEventListener('click', async () => {
 });
 
 sidebarToggle.addEventListener('click', () => sidebar.classList.toggle('open'));
+
+// Sidebar "+ 新增" dropdown
+const addBtn = document.getElementById('sidebar-add-btn');
+const addMenu = document.getElementById('sidebar-add-menu');
+const addBlank = document.getElementById('sidebar-add-blank');
+if (addBtn && addMenu) {
+  addBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    addMenu.classList.toggle('hidden');
+  });
+  document.addEventListener('click', () => addMenu.classList.add('hidden'));
+}
+if (addBlank) {
+  addBlank.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    addMenu.classList.add('hidden');
+    const name = prompt('行程名稱', '我的新行程');
+    if (!name) return;
+    await withLoading('建立行程「' + name + '」…', async () => {
+      try {
+        const r = await store.createBlankBoard(name);
+        activeBoardId = r.id;
+        await store.setActiveId(r.id);
+        await refreshSidebar();
+        await loadActiveBoard();
+        showToast('已建立：' + r.name);
+      } catch (e2) {
+        showError('建立失敗：' + e2.message);
+      }
+    });
+  });
+}
 
 document.getElementById('reset-password').addEventListener('click', () => {
   store.clearPassword();

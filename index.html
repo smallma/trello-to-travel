@@ -19,10 +19,16 @@
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-header">
         <h1 class="font-serif text-lg text-[#2D5A4E]">📋 我的行程</h1>
-        <label class="sidebar-upload">
-          + 新增
-          <input id="file-input" type="file" accept=".json,application/json" hidden>
-        </label>
+        <div class="sidebar-add">
+          <button id="sidebar-add-btn" class="sidebar-upload" title="新增行程">+ 新增</button>
+          <div id="sidebar-add-menu" class="sidebar-add-menu hidden">
+            <label class="sidebar-add-item">
+              📂 上傳 Trello JSON
+              <input id="file-input" type="file" accept=".json,application/json" hidden>
+            </label>
+            <button id="sidebar-add-blank" class="sidebar-add-item">📝 建立空白行程</button>
+          </div>
+        </div>
       </div>
       <div class="sidebar-empty" id="sidebar-empty">
         尚未匯入<br>點「+ 新增」上傳 Trello JSON

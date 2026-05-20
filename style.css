@@ -47,6 +47,36 @@ body { font-family: 'Noto Sans TC', sans-serif; margin: 0; }
   transition: background .15s;
 }
 .sidebar-upload:hover { background: var(--accent); }
+/* Sidebar add dropdown */
+.sidebar-add { position: relative; }
+.sidebar-add-menu { position: absolute; top: 32px; right: 0; background: #fff; border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.1); min-width: 180px; padding: 4px 0; z-index: 10; }
+.sidebar-add-menu.hidden { display: none; }
+.sidebar-add-item { display: block; width: 100%; padding: 8px 14px; font-size: 13px; color: #374151; background: none; border: none; text-align: left; cursor: pointer; }
+.sidebar-add-item:hover { background: #ecfdf5; color: var(--brand); }
+
+/* Add-day slot between day blocks */
+.add-day-slot { padding: 4px 0; text-align: center; }
+.add-day-btn {
+  width: 100%;
+  background: transparent;
+  border: 1px dashed transparent;
+  color: transparent;
+  padding: 6px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all .15s;
+}
+.add-day-slot:hover .add-day-btn,
+.add-day-btn:focus {
+  border-color: var(--brand);
+  color: var(--brand);
+  background: #f9fafb;
+}
+.add-day-btn:hover { background: var(--brand); color: #fff; border-color: var(--brand); }
+
+.empty-day-hint { text-align: center; color: #9ca3af; padding: 40px 20px; font-size: 13.5px; line-height: 2; }
+
 .sidebar-empty {
   padding: 24px 16px;
   text-align: center;

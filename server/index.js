@@ -355,6 +355,87 @@ app.put('/api/boards/:id', async (c) => {
   return c.json({ ok: true, id });
 });
 
+// Create a blank board from scratch (no Trello JSON required).
+// Body: { name: "我的新行程" }
+app.post('/api/boards/blank', async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const name = (body?.name || '').trim() || '新行程';
+  const id = 'blk_' + randomBytes(8).toString('hex');
+  const now = Date.now();
+  // Minimal valid Trello-shaped JSON so the existing parser path stays intact
+  const raw = { name, lists: [], cards: [], labelNames: {} };
+  stmt.upsertBoard.run({
+    id, name,
+    raw_json: JSON.stringify(raw),
+    imported_at: now, updated_at: now,
+  });
+  return c.json({ ok: true, id, name });
+});
+
+// Add an empty day list to a board.
+// Body: { list_name: "6/19 維也納", after_date?: "6/18" }
+// The new day inherits a day_order pos placing it just after `after_date`
+// (or at the very top if after_date is missing/null).
+app.post('/api/boards/:id/days', async (c) => {
+  const boardId = c.req.param('id');
+  const body = await c.req.json().catch(() => ({}));
+  const listName = (body?.list_name || '').trim();
+  if (!listName) return c.json({ error: 'list_name required' }, 400);
+
+  // Parse date from list_name like "6/19 維也納" or "Day 1 - 1/23"
+  const m = listName.match(/(?:^|[^\d])(\d{1,2})\/(\d{1,2})(?!\d)/);
+  if (!m) {
+    return c.json({ error: 'list_name 需要包含 M/D 格式日期（例：「6/19 維也納」）' }, 400);
+  }
+  const date = `${parseInt(m[1], 10)}/${parseInt(m[2], 10)}`;
+
+  // Persist into the board's raw_json so the parser sees it on next load
+  const board = stmt.getBoard.get(boardId);
+  if (!board) return c.json({ error: 'board not found' }, 404);
+  const raw = JSON.parse(board.raw_json);
+  if (!Array.isArray(raw.lists)) raw.lists = [];
+  if (!Array.isArray(raw.cards)) raw.cards = [];
+  // Skip if a list with the same date already exists (avoid duplicate days)
+  const existingSameDate = raw.lists.find(l => {
+    if (l.closed) return false;
+    const lm = (l.name || '').match(/(?:^|[^\d])(\d{1,2})\/(\d{1,2})(?!\d)/);
+    return lm && `${parseInt(lm[1], 10)}/${parseInt(lm[2], 10)}` === date;
+  });
+  if (existingSameDate) {
+    return c.json({ error: `日期 ${date} 已有對應的「${existingSameDate.name}」` }, 409);
+  }
+  const maxPos = raw.lists.reduce((m, l) => Math.max(m, l.pos || 0), 0);
+  const listId = 'list_' + randomBytes(6).toString('hex');
+  raw.lists.push({ id: listId, name: listName, closed: false, pos: maxPos + 65536 });
+  stmt.upsertBoard.run({
+    id: boardId,
+    name: board.name,
+    raw_json: JSON.stringify(raw),
+    imported_at: board.imported_at,
+    updated_at: Date.now(),
+  });
+
+  // Optionally set day_order to position the new day after `after_date`
+  const afterDate = typeof body?.after_date === 'string' ? body.after_date : null;
+  if (afterDate) {
+    // Recompute day_order: place new date at (after_date pos + 0.5 * step)
+    const existingOrder = {};
+    for (const r of stmt.listDayOrder.all(boardId)) existingOrder[r.day_date] = r.pos;
+    const afterPos = existingOrder[afterDate];
+    if (typeof afterPos === 'number') {
+      // Find next pos > afterPos
+      const positions = Object.entries(existingOrder)
+        .filter(([d, p]) => p > afterPos)
+        .map(([_, p]) => p);
+      const nextPos = positions.length ? Math.min(...positions) : afterPos + 2048;
+      const midPos = (afterPos + nextPos) / 2;
+      stmt.upsertDayOrder.run(boardId, date, midPos);
+    }
+  }
+
+  return c.json({ ok: true, date, list_name: listName, list_id: listId });
+});
+
 // Delete board
 app.delete('/api/boards/:id', (c) => {
   const id = c.req.param('id');

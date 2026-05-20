@@ -228,6 +228,20 @@ export async function deleteBoard(id) {
   await api(`/api/boards/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
+export async function createBlankBoard(name) {
+  return await api('/api/boards/blank', {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function addDay(boardId, listName, afterDate) {
+  return await api(`/api/boards/${encodeURIComponent(boardId)}/days`, {
+    method: 'POST',
+    body: JSON.stringify({ list_name: listName, after_date: afterDate || null }),
+  });
+}
+
 // ---------- active board (per-account, synced across devices) ----------
 export async function getActiveId() {
   try {

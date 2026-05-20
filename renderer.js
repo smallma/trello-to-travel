@@ -19,6 +19,7 @@ let isEditingRouteCb = () => false;
 let geocodeCb = null;
 let onReorderItemsCb = null;
 let onReorderDaysCb = null;
+let onAddDayCb = null;          // (afterDayDate|null) => Promise
 let getAttachmentsForItemCb = null;   // (itemId) => Array
 let getAttachmentUrlCb = null;        // (id, variant) => string
 let deleteAttachmentCb = null;        // (id) => Promise
@@ -43,6 +44,7 @@ export function setRouteHandlers(opts) {
   geocodeCb = opts.geocode;
   onReorderItemsCb = opts.onReorderItems;
   onReorderDaysCb = opts.onReorderDays;
+  onAddDayCb = opts.onAddDay;
   getAttachmentsForItemCb = opts.getAttachmentsForItem;
   getAttachmentUrlCb = opts.getAttachmentUrl;
   deleteAttachmentCb = opts.deleteAttachment;
@@ -68,12 +70,23 @@ export function renderApp(data) {
 
   const hidden = (getHiddenCb && getHiddenCb()) || new Set();
 
+  // Top-of-list "+ 新增日" slot
+  if (onAddDayCb) main.appendChild(renderAddDaySlot(null));
+
   for (const day of data.days) {
     const filteredDay = {
       ...day,
       items: day.items.filter(it => !hidden.has(it.id)),
     };
     main.appendChild(renderDay(filteredDay));
+    if (onAddDayCb) main.appendChild(renderAddDaySlot(day.date));
+  }
+
+  if (data.days.length === 0 && onAddDayCb) {
+    // Already added top slot above; show an inviting empty-state message
+    const empty = el('div', 'empty-day-hint', '');
+    empty.innerHTML = '<p>此行程還沒有任何日期區塊。</p><p>滑鼠移到上方的虛線即可新增第一天。</p>';
+    main.appendChild(empty);
   }
 
   if (Object.keys(data.extras).length > 0) {
@@ -87,6 +100,13 @@ export function renderApp(data) {
   refreshEditRouteMode();
   initDayDragging();
   initItemDragging();
+}
+
+function renderAddDaySlot(afterDate) {
+  const slot = el('div', 'add-day-slot');
+  slot.innerHTML = `<button class="add-day-btn">+ 新增日</button>`;
+  slot.querySelector('.add-day-btn').addEventListener('click', () => onAddDayCb(afterDate));
+  return slot;
 }
 
 function initDayDragging() {
